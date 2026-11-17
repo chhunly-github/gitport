@@ -18,7 +18,7 @@ public record GitWorktree(
     bool IsPrunable
 ) {
     public string DisplayBranch => string.IsNullOrEmpty(Branch)
-        ? (IsMain ? "HEAD" : "(detached)")
+        ? (IsMain ? "HEAD" : (HeadCommit.Length >= 7 ? $"(detached at {HeadCommit[..7]})" : "(detached)"))
         : Branch.StartsWith("refs/heads/") ? Branch.Substring(11) : Branch;
 }
 
@@ -145,7 +145,15 @@ public class GitService
                     currentBranch = "";
                     currentHead = "";
                 }
-                currentPath = t.Substring(9).Trim();
+                string rawPath = t.Substring(9).Trim();
+                try
+                {
+                    currentPath = Path.GetFullPath(rawPath);
+                }
+                catch
+                {
+                    currentPath = rawPath;
+                }
             }
             else if (t.StartsWith("HEAD ")) currentHead = t.Substring(5).Trim();
             else if (t.StartsWith("branch ")) currentBranch = t.Substring(7).Trim();
@@ -335,27 +343,60 @@ public class GitService
         return code == 0;
     }
 
-    public async Task<bool> CreateWorktreeAsync(string path, string branch, string? baseRef = null)
+    public async Task<(bool Success, string Error)> CreateWorktreeAsync(
+        string path,
+        string? branch = null,
+        string? baseRef = null,
+        bool createNewBranch = false,
+        bool detach = false,
+        bool force = false)
     {
         var args = new List<string> { "worktree", "add" };
-        if (!string.IsNullOrEmpty(branch))
+        if (force) args.Add("--force");
+        if (detach) args.Add("--detach");
+
+        if (createNewBranch && !string.IsNullOrEmpty(branch))
         {
             args.AddRange(new[] { "-b", branch });
+            args.Add(path);
+            if (!string.IsNullOrEmpty(baseRef)) args.Add(baseRef);
         }
-        args.Add(path);
-        if (!string.IsNullOrEmpty(baseRef)) args.Add(baseRef);
+        else
+        {
+            args.Add(path);
+            if (!string.IsNullOrEmpty(branch))
+            {
+                args.Add(branch);
+            }
+            else if (!string.IsNullOrEmpty(baseRef))
+            {
+                args.Add(baseRef);
+            }
+        }
 
-        var (code, _, _) = await RunGitAsync(args.ToArray());
-        return code == 0;
+        var (code, stdout, stderr) = await RunGitAsync(args.ToArray());
+        if (code == 0) return (true, "");
+        string err = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+        return (false, string.IsNullOrWhiteSpace(err) ? "Unknown git error" : err.Trim());
     }
 
-    public async Task<bool> RemoveWorktreeAsync(string path, bool force = false)
+    public async Task<(bool Success, string Error)> RemoveWorktreeAsync(string path, bool force = false)
     {
         var args = new List<string> { "worktree", "remove" };
         if (force) args.Add("--force");
         args.Add(path);
-        var (code, _, _) = await RunGitAsync(args.ToArray());
-        return code == 0;
+        var (code, stdout, stderr) = await RunGitAsync(args.ToArray());
+        if (code == 0) return (true, "");
+        string err = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+        return (false, string.IsNullOrWhiteSpace(err) ? "Unknown git error" : err.Trim());
+    }
+
+    public async Task<(bool Success, string Error)> PruneWorktreesAsync()
+    {
+        var (code, stdout, stderr) = await RunGitAsync("worktree", "prune");
+        if (code == 0) return (true, "");
+        string err = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+        return (false, string.IsNullOrWhiteSpace(err) ? "Unknown git error" : err.Trim());
     }
 
     public async Task<(bool Success, string Output)> MergeWithOutputAsync(string refName, bool fetchFirst = false)

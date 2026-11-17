@@ -62,13 +62,21 @@ public class GitPortTests
 
         var tree = BranchTreeBuilder.BuildTree("ly", worktrees, refs);
 
-        Assert.Equal(4, tree.Count); // All Branches, HEAD, Local, Remote
+        Assert.Equal(5, tree.Count); // All Branches, HEAD, Worktrees, Local, Remote
         Assert.Equal("All Branches", tree[0].Name);
         Assert.Equal("HEAD (Current Branch)", tree[1].Name);
-        Assert.Equal("Local", tree[2].Name);
-        Assert.Equal("Remote", tree[3].Name);
+        Assert.Equal("Worktrees", tree[2].Name);
+        Assert.Equal("Local", tree[3].Name);
+        Assert.Equal("Remote", tree[4].Name);
 
-        var local = tree[2];
+        // Worktrees Category verification
+        var worktreesCat = tree[2];
+        Assert.Single(worktreesCat.Children);
+        var wtCatItem = worktreesCat.Children[0];
+        Assert.Equal(@"C:\Repos\main-project-agent", wtCatItem.WorktreePath);
+        Assert.True(wtCatItem.IsWorktree);
+
+        var local = tree[3];
         // local should contain ly (current), master (isStar), agents (folder)
         var lyBranch = local.Children.FirstOrDefault(c => c.Name == "ly");
         Assert.NotNull(lyBranch);
@@ -86,9 +94,10 @@ public class GitPortTests
         var wtBranch = agentsFolder.Children.FirstOrDefault(c => c.Name == "worktree-agent-1");
         Assert.NotNull(wtBranch);
         Assert.True(wtBranch.IsWorktree);
+        Assert.Equal(@"C:\Repos\main-project-agent", wtBranch.WorktreePath);
 
         // Remote
-        var remote = tree[3];
+        var remote = tree[4];
         var originFolder = remote.Children.FirstOrDefault(c => c.Name == "origin");
         Assert.NotNull(originFolder);
         var originMain = originFolder.Children.FirstOrDefault(c => c.Name == "main");
@@ -244,7 +253,45 @@ public class GitPortTests
         };
 
         var tree = BranchTreeBuilder.BuildTree("main", worktrees, refs);
-        Assert.Equal(4, tree.Count); // All Branches, HEAD, Local, Remote
+        Assert.Equal(5, tree.Count); // All Branches, HEAD, Worktrees, Local, Remote
+        Assert.Equal("All Branches", tree[0].Name);
+        Assert.Equal("HEAD (Current Branch)", tree[1].Name);
+        Assert.Equal("Worktrees", tree[2].Name);
+        Assert.Equal("Local", tree[3].Name);
+        Assert.Equal("Remote", tree[4].Name);
+    }
+
+    [Fact]
+    public void TestGitWorktree_DisplayBranch_DetachedAndNamed()
+    {
+        var namedWt = new GitWorktree(@"C:\Repos\wt-named", "a1b2c3d4e5f6", "refs/heads/feature/login", false, false, "", false);
+        Assert.Equal("feature/login", namedWt.DisplayBranch);
+
+        var detachedWt = new GitWorktree(@"C:\Repos\wt-detached", "a1b2c3d4e5f6", "", false, false, "", false);
+        Assert.Equal("(detached at a1b2c3d)", detachedWt.DisplayBranch);
+
+        var mainWt = new GitWorktree(@"C:\Repos\wt-main", "a1b2c3d4e5f6", "", true, false, "", false);
+        Assert.Equal("HEAD", mainWt.DisplayBranch);
+    }
+
+    [Fact]
+    public void TestBranchTreeBuilder_DetachedWorktreeInTree()
+    {
+        var worktrees = new List<GitWorktree>
+        {
+            new(@"C:\Repos\App", "head1", "refs/heads/main", true, false, "", false),
+            new(@"C:\Repos\App-detached", "c0ffee123456", "", false, false, "", false)
+        };
+        var refs = new List<string> { "refs/heads/main" };
+
+        var tree = BranchTreeBuilder.BuildTree("main", worktrees, refs);
+        var worktreesCat = tree.FirstOrDefault(c => c.Name == "Worktrees");
+        Assert.NotNull(worktreesCat);
+        Assert.Single(worktreesCat.Children);
+        var wtChild = worktreesCat.Children[0];
+        Assert.Equal(@"C:\Repos\App-detached", wtChild.WorktreePath);
+        Assert.Contains("(detached at c0ffee1)", wtChild.Name);
+        Assert.True(wtChild.IsWorktree);
     }
 
     [Fact]

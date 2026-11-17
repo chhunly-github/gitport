@@ -37,9 +37,37 @@ public class BranchTreeBuilder
         };
         rootList.Add(headItem);
 
-        // Map worktrees by branch name and leaf name
+        // 3. Worktrees (Dedicated category for all linked secondary worktrees)
+        var worktreesCategory = new GitBranchItem
+        {
+            Name = "Worktrees",
+            FullRef = "WORKTREES",
+            Kind = BranchItemKind.Category,
+            IsExpanded = true
+        };
+
+        foreach (var wt in worktrees.Where(w => !w.IsMain))
+        {
+            string folderName = System.IO.Path.GetFileName(wt.Path.TrimEnd('/', '\\'));
+            if (string.IsNullOrEmpty(folderName)) folderName = wt.Path;
+            string label = $"{folderName} [{wt.DisplayBranch}]";
+
+            var wtItem = new GitBranchItem
+            {
+                Name = label,
+                FullRef = !string.IsNullOrEmpty(wt.Branch) ? wt.Branch : wt.HeadCommit,
+                Kind = BranchItemKind.Worktree,
+                IsWorktree = true,
+                WorktreePath = wt.Path,
+                BadgeText = wt.IsLocked ? "🔒" : ""
+            };
+            worktreesCategory.Children.Add(wtItem);
+        }
+        rootList.Add(worktreesCategory);
+
+        // Map secondary worktrees by branch name and leaf name for linking in Local branches
         var worktreeBranchMap = new Dictionary<string, GitWorktree>(StringComparer.OrdinalIgnoreCase);
-        foreach (var wt in worktrees)
+        foreach (var wt in worktrees.Where(w => !w.IsMain))
         {
             string b = wt.DisplayBranch;
             if (!string.IsNullOrEmpty(b))
@@ -52,9 +80,13 @@ public class BranchTreeBuilder
                 string leaf = b.Contains('/') ? b.Substring(b.LastIndexOf('/') + 1) : b;
                 worktreeBranchMap[leaf] = wt;
             }
+            if (!string.IsNullOrEmpty(wt.Branch))
+            {
+                worktreeBranchMap[wt.Branch] = wt;
+            }
         }
 
-        // 3. Local
+        // 4. Local
         var localCategory = new GitBranchItem
         {
             Name = "Local",
@@ -62,7 +94,7 @@ public class BranchTreeBuilder
             IsExpanded = true
         };
 
-        // 4. Remote
+        // 5. Remote
         var remoteCategory = new GitBranchItem
         {
             Name = "Remote",
@@ -173,10 +205,6 @@ public class BranchTreeBuilder
                     isSecondaryWorktree = true;
                     wtPath = wtLeaf.Path;
                 }
-            }
-            else if (b.StartsWith("worktree-"))
-            {
-                isSecondaryWorktree = true;
             }
 
             bool isStar = leafName.Equals("master", StringComparison.OrdinalIgnoreCase) ||

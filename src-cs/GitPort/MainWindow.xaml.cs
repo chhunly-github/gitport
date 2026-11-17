@@ -53,7 +53,7 @@ public partial class MainWindow : Window
 
         Loaded += async (_, _) =>
         {
-            if (!string.IsNullOrEmpty(initialRepo) && Directory.Exists(Path.Combine(initialRepo, ".git")))
+            if (!string.IsNullOrEmpty(initialRepo) && (Directory.Exists(Path.Combine(initialRepo, ".git")) || File.Exists(Path.Combine(initialRepo, ".git"))))
             {
                 await OpenRepositoryAsTabAsync(initialRepo);
             }
@@ -79,7 +79,7 @@ public partial class MainWindow : Window
         }
 
         string current = Directory.GetCurrentDirectory();
-        if (Directory.Exists(current) && Directory.Exists(Path.Combine(current, ".git")))
+        if (Directory.Exists(current) && (Directory.Exists(Path.Combine(current, ".git")) || File.Exists(Path.Combine(current, ".git"))))
         {
             return Path.GetFullPath(current);
         }
@@ -1235,7 +1235,7 @@ public partial class MainWindow : Window
 
         // 8. New Worktree...
         var newWt = new MenuItem { Header = "New Worktree..." };
-        newWt.Click += (_, _) => ShowNewWorktreeDialog(branchName);
+        newWt.Click += (_, _) => ShowNewWorktreeDialog(branchName, isExistingBranch: true);
         branchMenu.Items.Add(newWt);
 
         branchMenu.Items.Add(new Separator());
@@ -1448,7 +1448,7 @@ public partial class MainWindow : Window
 
         // 12. New Worktree...
         var newWorktreeItem = new MenuItem { Header = "New Worktree..." };
-        newWorktreeItem.Click += (_, _) => ShowNewWorktreeDialog(commit.Hash);
+        newWorktreeItem.Click += (_, _) => ShowNewWorktreeDialog(commit.Hash, isExistingBranch: false);
         menu.Items.Add(newWorktreeItem);
 
         menu.Items.Add(new Separator());
@@ -1663,14 +1663,21 @@ public partial class MainWindow : Window
 
         var menu = new ContextMenu();
 
-        if (item.Kind == BranchItemKind.Worktree)
+        if (item.Kind == BranchItemKind.Worktree || (item.IsWorktree && !string.IsNullOrEmpty(item.WorktreePath)))
         {
-            var openTabItem = new MenuItem { Header = $"Open Worktree '{item.Name}' in Tab" };
+            var openTabItem = new MenuItem { Header = $"Open Worktree in Tab" };
             openTabItem.Click += async (_, _) =>
             {
                 if (!string.IsNullOrEmpty(item.WorktreePath))
                 {
-                    await OpenRepositoryAsTabAsync(item.WorktreePath);
+                    if (Directory.Exists(item.WorktreePath))
+                    {
+                        await OpenRepositoryAsTabAsync(item.WorktreePath);
+                    }
+                    else
+                    {
+                        MessageBox.Show(this, $"Worktree directory does not exist:\n{item.WorktreePath}", "Cannot Open Worktree", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
                 }
             };
             menu.Items.Add(openTabItem);
@@ -1685,12 +1692,23 @@ public partial class MainWindow : Window
             };
             menu.Items.Add(openExplorerItem);
 
+            var openTerminalItem = new MenuItem { Header = "Open Terminal Here" };
+            openTerminalItem.Click += (_, _) =>
+            {
+                if (!string.IsNullOrEmpty(item.WorktreePath))
+                {
+                    OpenTerminalAt(item.WorktreePath);
+                }
+            };
+            menu.Items.Add(openTerminalItem);
+
             var copyPathItem = new MenuItem { Header = "Copy Worktree Path" };
             copyPathItem.Click += (_, _) =>
             {
                 if (!string.IsNullOrEmpty(item.WorktreePath))
                 {
                     SafeSetClipboard(item.WorktreePath);
+                    TxtStatusMessage.Text = $"Copied path to clipboard: {item.WorktreePath}";
                 }
             };
             menu.Items.Add(copyPathItem);
@@ -1700,15 +1718,40 @@ public partial class MainWindow : Window
             var removeWtItem = new MenuItem { Header = $"Remove Worktree '{item.Name}'..." };
             removeWtItem.Click += async (_, _) =>
             {
+                if (string.IsNullOrEmpty(item.WorktreePath)) return;
                 var res = MessageBox.Show(this,
-                    $"Are you sure you want to remove worktree '{item.Name}' at:\n{item.WorktreePath}?",
+                    $"Are you sure you want to remove worktree '{item.Name}' at:\n{item.WorktreePath}?\n\nThis will remove the working directory and unregister the worktree.",
                     "Remove Worktree", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-                if (res == MessageBoxResult.Yes && !string.IsNullOrEmpty(item.WorktreePath))
+                if (res == MessageBoxResult.Yes)
                 {
                     TxtStatusMessage.Text = $"Removing worktree {item.Name}...";
-                    await _gitService.RemoveWorktreeAsync(item.WorktreePath, force: true);
-                    await LoadRepositoryAsync(_gitService.RepositoryPath);
-                    TxtStatusMessage.Text = "Worktree removed.";
+
+                    var openTab = _openTabs.FirstOrDefault(t => string.Equals(t.Path, item.WorktreePath, StringComparison.OrdinalIgnoreCase));
+                    if (openTab != null)
+                    {
+                        await CloseTabAsync(openTab);
+                    }
+
+                    var (ok, error) = await _gitService.RemoveWorktreeAsync(item.WorktreePath, force: true);
+                    if (!ok)
+                    {
+                        if (!Directory.Exists(item.WorktreePath))
+                        {
+                            await _gitService.PruneWorktreesAsync();
+                            await LoadRepositoryAsync(_gitService.RepositoryPath);
+                            TxtStatusMessage.Text = "Pruned missing worktree.";
+                            return;
+                        }
+                        MessageBox.Show(this, $"Failed to remove worktree:\n{error}", "Remove Worktree Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                        TxtStatusMessage.Text = "Failed to remove worktree.";
+                    }
+                    else
+                    {
+                        await _gitService.PruneWorktreesAsync();
+                        _catalog.RemoveRepository(item.WorktreePath);
+                        await LoadRepositoryAsync(_gitService.RepositoryPath);
+                        TxtStatusMessage.Text = $"Worktree '{item.Name}' removed.";
+                    }
                 }
             };
             menu.Items.Add(removeWtItem);
@@ -1751,7 +1794,7 @@ public partial class MainWindow : Window
                 menu.Items.Add(newBranchItem);
 
                 var newWorktreeItem = new MenuItem { Header = $"New Worktree from '{branchName}'..." };
-                newWorktreeItem.Click += (_, _) => ShowNewWorktreeDialog(item.FullRef);
+                newWorktreeItem.Click += (_, _) => ShowNewWorktreeDialog(item.FullRef, isExistingBranch: true);
                 menu.Items.Add(newWorktreeItem);
 
                 menu.Items.Add(new Separator());
@@ -1872,7 +1915,7 @@ public partial class MainWindow : Window
                 menu.Items.Add(rebaseItem);
 
                 var newWorktreeItem = new MenuItem { Header = $"New Worktree from '{branchName}'..." };
-                newWorktreeItem.Click += (_, _) => ShowNewWorktreeDialog(item.FullRef);
+                newWorktreeItem.Click += (_, _) => ShowNewWorktreeDialog(item.FullRef, isExistingBranch: false);
                 menu.Items.Add(newWorktreeItem);
 
                 menu.Items.Add(new Separator());
@@ -1904,7 +1947,28 @@ public partial class MainWindow : Window
         }
         else if (item.Kind == BranchItemKind.Category)
         {
-            if (item.FullRef == "HEAD")
+            if (item.FullRef == "WORKTREES" || item.Name == "Worktrees")
+            {
+                var newWt = new MenuItem { Header = "New Worktree..." };
+                newWt.Click += (_, _) => ShowNewWorktreeDialog();
+                menu.Items.Add(newWt);
+
+                var pruneWt = new MenuItem { Header = "Prune Stale Worktrees" };
+                pruneWt.Click += async (_, _) =>
+                {
+                    TxtStatusMessage.Text = "Pruning stale worktrees...";
+                    var (ok, err) = await _gitService.PruneWorktreesAsync();
+                    await LoadRepositoryAsync(_gitService.RepositoryPath);
+                    TxtStatusMessage.Text = ok ? "Worktrees pruned." : $"Prune failed: {err}";
+                };
+                menu.Items.Add(pruneWt);
+
+                menu.Items.Add(new Separator());
+                var refreshWtItem = new MenuItem { Header = "Refresh Worktrees" };
+                refreshWtItem.Click += async (_, _) => await LoadRepositoryAsync(_gitService.RepositoryPath);
+                menu.Items.Add(refreshWtItem);
+            }
+            else if (item.FullRef == "HEAD")
             {
                 var newBranchItem = new MenuItem { Header = "New Branch from HEAD..." };
                 newBranchItem.Click += async (_, _) =>
@@ -1923,7 +1987,7 @@ public partial class MainWindow : Window
                 menu.Items.Add(newBranchItem);
 
                 var newWorktreeItem = new MenuItem { Header = "New Worktree from HEAD..." };
-                newWorktreeItem.Click += (_, _) => ShowNewWorktreeDialog("HEAD");
+                newWorktreeItem.Click += (_, _) => ShowNewWorktreeDialog("HEAD", isExistingBranch: false);
                 menu.Items.Add(newWorktreeItem);
             }
             else if (item.Name == "Remote")
@@ -2086,20 +2150,98 @@ public partial class MainWindow : Window
         ShowNewWorktreeDialog();
     }
 
-    private void ShowNewWorktreeDialog(string? baseRef = null)
+    private async void ShowNewWorktreeDialog(string? baseRef = null, bool isExistingBranch = false)
     {
-        var dlg = new NewWorktreeDialog(_gitService.RepositoryPath, defaultBase: baseRef) { Owner = this };
+        string? branchCandidate = null;
+        if (isExistingBranch && !string.IsNullOrEmpty(baseRef))
+        {
+            branchCandidate = baseRef.StartsWith("refs/heads/") ? baseRef.Substring(11) : baseRef;
+        }
+
+        var cleanBranches = _branchRefs
+            .Select(r => r.StartsWith("refs/heads/") ? r.Substring(11) : (r.StartsWith("refs/remotes/") ? r.Substring(13) : r))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(b => b)
+            .ToList();
+
+        var dlg = new NewWorktreeDialog(
+            _gitService.RepositoryPath,
+            defaultBranch: branchCandidate,
+            defaultBase: baseRef,
+            isExistingBranch: isExistingBranch,
+            availableBranches: cleanBranches)
+        {
+            Owner = this
+        };
+
         if (dlg.ShowDialog() == true && !string.IsNullOrEmpty(dlg.LocationPath))
         {
-            Task.Run(async () =>
+            TxtStatusMessage.Text = $"Creating worktree at '{dlg.LocationPath}'...";
+            try
             {
-                await _gitService.CreateWorktreeAsync(dlg.LocationPath, dlg.BranchName, dlg.BaseRef);
-                await Dispatcher.InvokeAsync(async () =>
+                var (success, error) = await _gitService.CreateWorktreeAsync(
+                    dlg.LocationPath,
+                    dlg.BranchName,
+                    dlg.BaseRef,
+                    createNewBranch: dlg.CreateNewBranch,
+                    detach: dlg.Detach);
+
+                if (!success)
                 {
-                    await LoadRepositoryAsync(_gitService.RepositoryPath);
+                    MessageBox.Show(this,
+                        $"Failed to create worktree:\n{error}",
+                        "Worktree Creation Error",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error);
+                    TxtStatusMessage.Text = "Failed to create worktree.";
+                    return;
+                }
+
+                TxtStatusMessage.Text = $"Worktree created at '{dlg.LocationPath}'.";
+                await LoadRepositoryAsync(_gitService.RepositoryPath);
+
+                if (dlg.OpenTabImmediately)
+                {
                     await OpenRepositoryAsTabAsync(dlg.LocationPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"Error creating worktree:\n{ex.Message}",
+                    "Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                TxtStatusMessage.Text = "Error creating worktree.";
+            }
+        }
+    }
+
+    private static void OpenTerminalAt(string folderPath)
+    {
+        try
+        {
+            if (!Directory.Exists(folderPath)) return;
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                WorkingDirectory = folderPath,
+                UseShellExecute = true
+            };
+            Process.Start(psi);
+        }
+        catch
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    WorkingDirectory = folderPath,
+                    UseShellExecute = true
                 });
-            });
+            }
+            catch { }
         }
     }
 
