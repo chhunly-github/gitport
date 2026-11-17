@@ -1,0 +1,25 @@
+<Window x:Class="GitPort.Dialogs.InputBoxDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Input" Height="170" Width="440"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Background="#1E324C" Foreground="#E6EEF8"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="ClearType">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="TxtPrompt" Text="Enter name:" Grid.Row="0" Margin="0,0,0,8" FontSize="13" Foreground="#DFE1E5"/>
+        <TextBox x:Name="TxtInput" Grid.Row="1" Style="{StaticResource WebStormSearchBox}" Height="28" FontSize="13"/>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,12,0,0">
+            <Button Content="Cancel" Style="{StaticResource WebStormGhostButton}" Click="OnCancel" Width="75" Height="28" Margin="0,0,8,0"/>
+            <Button Content="OK" Style="{StaticResource WebStormButton}" Click="OnOk" Width="75" Height="28" IsDefault="True"/>
+        </StackPanel>
+    </Grid>
+</Window>
