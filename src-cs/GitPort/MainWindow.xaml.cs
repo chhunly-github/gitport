@@ -497,6 +497,9 @@ public partial class MainWindow : Window
             TxtBranchFilterLabel.Text = "All Branches";
             await LoadCommitsForRefAsync(_activeFilterRef);
 
+            // 5. Update Outgoing Commits Push Status
+            await UpdatePushStatusAsync();
+
             TxtStatusMessage.Text = "Ready";
         }
         catch (Exception ex)
@@ -984,6 +987,7 @@ public partial class MainWindow : Window
             await RefreshWorkingTreeAsync();
             _headCommitHash = await _gitService.GetHeadCommitHashAsync();
             await LoadCommitsForRefAsync(_activeFilterRef);
+            await UpdatePushStatusAsync();
         }
         else
         {
@@ -1244,9 +1248,7 @@ public partial class MainWindow : Window
         var pullRebase = new MenuItem { Header = $"Pull into '{_currentBranch}' Using Rebase" };
         pullRebase.Click += async (_, _) =>
         {
-            TxtStatusMessage.Text = $"Pulling {branchName} into {_currentBranch} (rebase)...";
-            await _gitService.PullAsync(branchName, rebase: true);
-            await LoadRepositoryAsync(_gitService.RepositoryPath);
+            await ExecutePullWithAuthRetryAsync(branchName, rebase: true);
         };
         branchMenu.Items.Add(pullRebase);
 
@@ -1254,9 +1256,7 @@ public partial class MainWindow : Window
         var pullMerge = new MenuItem { Header = $"Pull into '{_currentBranch}' Using Merge" };
         pullMerge.Click += async (_, _) =>
         {
-            TxtStatusMessage.Text = $"Pulling {branchName} into {_currentBranch} (merge)...";
-            await _gitService.PullAsync(branchName, rebase: false);
-            await LoadRepositoryAsync(_gitService.RepositoryPath);
+            await ExecutePullWithAuthRetryAsync(branchName, rebase: false);
         };
         branchMenu.Items.Add(pullMerge);
 
@@ -1888,9 +1888,7 @@ public partial class MainWindow : Window
                 var pullItem = new MenuItem { Header = $"Pull into '{_currentBranch}'" };
                 pullItem.Click += async (_, _) =>
                 {
-                    TxtStatusMessage.Text = $"Pulling {item.Name}...";
-                    await _gitService.PullAsync(item.Name);
-                    await LoadRepositoryAsync(_gitService.RepositoryPath);
+                    await ExecutePullWithAuthRetryAsync(item.Name, rebase: false);
                 };
                 menu.Items.Add(pullItem);
 
@@ -2130,19 +2128,167 @@ public partial class MainWindow : Window
         TxtStatusMessage.Text = "Fetch complete.";
     }
 
+    private async Task<bool> ExecutePullWithAuthRetryAsync(string? targetRef = null, bool rebase = false)
+    {
+        TxtStatusMessage.Text = string.IsNullOrEmpty(targetRef)
+            ? $"Pulling '{_currentBranch}'..."
+            : $"Pulling {targetRef} into '{_currentBranch}'...";
+
+        var (success, stdout, stderr) = await _gitService.PullWithDetailsAsync(targetRef, rebase);
+        if (!success)
+        {
+            string error = string.IsNullOrEmpty(stderr) ? stdout : stderr;
+            if (GitService.IsAuthFailure(error) || GitService.IsSslFailure(error))
+            {
+                TxtStatusMessage.Text = "Authentication required...";
+                string remoteUrl = await _gitService.GetRemoteUrlAsync();
+                var authDlg = new CredentialsDialog(remoteUrl, isSslError: GitService.IsSslFailure(error))
+                {
+                    Owner = this
+                };
+                if (authDlg.ShowDialog() == true)
+                {
+                    if (authDlg.DisableSslVerify)
+                    {
+                        await _gitService.SetSslVerifyAsync(false);
+                    }
+                    if (authDlg.RememberCredentials)
+                    {
+                        await _gitService.ApproveCredentialsAsync(remoteUrl, authDlg.Username, authDlg.Password);
+                    }
+                    TxtStatusMessage.Text = "Retrying pull with credentials...";
+                    var retry = await _gitService.PullWithDetailsAsync(targetRef, rebase);
+                    if (retry.Success)
+                    {
+                        TxtStatusMessage.Text = "Pull succeeded!";
+                        await LoadRepositoryAsync(_gitService.RepositoryPath);
+                        await UpdatePushStatusAsync();
+                        return true;
+                    }
+                    else
+                    {
+                        string retryError = string.IsNullOrEmpty(retry.Error) ? retry.Output : retry.Error;
+                        MessageBox.Show(this, $"Pull failed after authentication:\n\n{retryError}", "Git Pull Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        TxtStatusMessage.Text = "Pull failed.";
+                        return false;
+                    }
+                }
+                else
+                {
+                    TxtStatusMessage.Text = "Pull cancelled.";
+                    return false;
+                }
+            }
+            else if (GitService.IsConflictFailure(error))
+            {
+                MessageBox.Show(this, $"Pull resulted in merge conflicts:\n\n{error}\n\nPlease resolve conflicts in your working tree.", "Merge Conflicts", MessageBoxButton.OK, MessageBoxImage.Warning);
+                await LoadRepositoryAsync(_gitService.RepositoryPath);
+                await UpdatePushStatusAsync();
+                OnSubtabWorkingTreeClicked(this, new RoutedEventArgs());
+                return false;
+            }
+            else
+            {
+                MessageBox.Show(this, $"Git pull failed:\n\n{error}", "Git Pull Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                TxtStatusMessage.Text = "Pull failed.";
+                return false;
+            }
+        }
+
+        TxtStatusMessage.Text = "Pull complete.";
+        await LoadRepositoryAsync(_gitService.RepositoryPath);
+        await UpdatePushStatusAsync();
+        return true;
+    }
+
     private async void OnPullClicked(object sender, RoutedEventArgs e)
     {
-        TxtStatusMessage.Text = $"Pulling '{_currentBranch}'...";
-        await _gitService.PullAsync(_currentBranch);
-        await LoadRepositoryAsync(_gitService.RepositoryPath);
-        TxtStatusMessage.Text = "Pull complete.";
+        await ExecutePullWithAuthRetryAsync(null, rebase: false);
     }
 
     private async void OnPushClicked(object sender, RoutedEventArgs e)
     {
-        TxtStatusMessage.Text = $"Pushing '{_currentBranch}'...";
-        bool ok = await _gitService.PushAsync(_currentBranch);
-        TxtStatusMessage.Text = ok ? "Push complete." : "Push failed.";
+        var pushDlg = new PushDialog(_gitService, _currentBranch)
+        {
+            Owner = this
+        };
+        if (pushDlg.ShowDialog() == true)
+        {
+            TxtStatusMessage.Text = pushDlg.PushedCommitCount > 0
+                ? $"Successfully pushed {pushDlg.PushedCommitCount} commit(s) to remote."
+                : "Push complete.";
+            await LoadRepositoryAsync(_gitService.RepositoryPath);
+            await UpdatePushStatusAsync();
+        }
+    }
+
+    private async void OnToolbarCommitClicked(object sender, RoutedEventArgs e)
+    {
+        var commitDlg = new CommitDialog(_gitService, _currentBranch)
+        {
+            Owner = this
+        };
+        if (commitDlg.ShowDialog() == true)
+        {
+            TxtStatusMessage.Text = "Commit complete.";
+            await LoadRepositoryAsync(_gitService.RepositoryPath);
+            await UpdatePushStatusAsync();
+
+            if (commitDlg.ShouldPush)
+            {
+                OnPushClicked(sender, e);
+            }
+        }
+    }
+
+    public async Task UpdatePushStatusAsync()
+    {
+        try
+        {
+            int count = await _gitService.GetOutgoingCommitCountAsync(_currentBranch);
+            if (count > 0)
+            {
+                BtnToolbarPush.Content = $"⬆ Push ({count})";
+                BtnToolbarPush.ToolTip = $"Push {count} commit{(count > 1 ? "s" : "")} to remote (Ctrl+Shift+K)";
+                BtnToolbarPush.Foreground = (Brush)FindResource("BrushStar");
+            }
+            else
+            {
+                BtnToolbarPush.Content = "⬆ Push";
+                BtnToolbarPush.ToolTip = "Push Current Branch (Ctrl+Shift+K)";
+                BtnToolbarPush.Foreground = (Brush)FindResource("BrushTextMuted");
+            }
+        }
+        catch
+        {
+            BtnToolbarPush.Content = "⬆ Push";
+        }
+    }
+
+    private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.K && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+        {
+            if ((Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift)
+            {
+                OnPushClicked(this, new RoutedEventArgs());
+            }
+            else
+            {
+                OnToolbarCommitClicked(this, new RoutedEventArgs());
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.T && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+        {
+            OnPullClicked(this, new RoutedEventArgs());
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F5 && Keyboard.Modifiers == ModifierKeys.None)
+        {
+            OnRefreshClicked(this, new RoutedEventArgs());
+            e.Handled = true;
+        }
     }
 
     private void OnNewWorktreeClicked(object sender, RoutedEventArgs e)

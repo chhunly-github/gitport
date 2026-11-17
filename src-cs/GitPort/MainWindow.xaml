@@ -5,10 +5,12 @@
         xmlns:models="clr-namespace:GitPort.Models"
         Title="GitPort - Git Worktrees &amp; Multi-Repository Workspace" Height="860" Width="1480"
         MinHeight="600" MinWidth="980"
+        WindowState="Maximized"
         WindowStartupLocation="CenterScreen"
         Background="#152438" Foreground="#E6EEF8"
         FontFamily="Segoe UI Variable Text, Segoe UI, -apple-system, sans-serif"
         FontSize="12"
+        PreviewKeyDown="OnWindowPreviewKeyDown"
         TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="ClearType"
         RenderOptions.ClearTypeHint="Enabled"
@@ -304,11 +306,12 @@
                             <TextBlock Text="Paths ▾" Foreground="#8FA8C4" VerticalAlignment="Center" Margin="4,0"/>
                         </StackPanel>
 
-                        <!-- Right: Actions (Fetch, Pull, Push, New Worktree, Refresh) -->
+                        <!-- Right: Actions (Commit, Fetch, Pull, Push, New Worktree, Refresh) -->
                         <StackPanel Orientation="Horizontal" Grid.Column="2" VerticalAlignment="Center">
+                            <Button x:Name="BtnToolbarCommit" Content="✔ Commit..." Style="{StaticResource WebStormGhostButton}" Click="OnToolbarCommitClicked" Margin="0,0,4,0" ToolTip="Commit Changes (Ctrl+K)"/>
                             <Button Content="⬇ Fetch" Style="{StaticResource WebStormGhostButton}" Click="OnFetchAllClicked" Margin="0,0,4,0" ToolTip="Fetch All Remotes"/>
-                            <Button Content="⬆ Pull" Style="{StaticResource WebStormGhostButton}" Click="OnPullClicked" Margin="0,0,4,0" ToolTip="Pull Current Branch"/>
-                            <Button Content="⬆ Push" Style="{StaticResource WebStormGhostButton}" Click="OnPushClicked" Margin="0,0,4,0" ToolTip="Push Current Branch"/>
+                            <Button x:Name="BtnToolbarPull" Content="⬇ Pull" Style="{StaticResource WebStormGhostButton}" Click="OnPullClicked" Margin="0,0,4,0" ToolTip="Pull Current Branch (Ctrl+T)"/>
+                            <Button x:Name="BtnToolbarPush" Content="⬆ Push" Style="{StaticResource WebStormGhostButton}" Click="OnPushClicked" Margin="0,0,4,0" ToolTip="Push Current Branch (Ctrl+Shift+K)"/>
                             <Button Content="🔀 New Worktree" Style="{StaticResource WebStormButton}" Click="OnNewWorktreeClicked" Margin="0,0,4,0"/>
                             <Button Content="⟳" Style="{StaticResource WebStormGhostButton}" Click="OnRefreshClicked" ToolTip="Refresh (F5)" Padding="6,2"/>
                         </StackPanel>
@@ -1056,9 +1059,13 @@
                                         <!-- Shortcut hint -->
                                         <TextBlock Grid.Column="1" Text="Ctrl+Enter" Foreground="#6882A0" FontSize="10" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,8,0"/>
 
-                                        <!-- Commit Button -->
-                                        <Button x:Name="BtnCommit" Grid.Column="2" Content="Commit" Style="{StaticResource WebStormButton}"
-                                                Click="OnCommitClicked" Height="26" Padding="14,2" FontWeight="SemiBold"/>
+                                        <!-- Commit Buttons -->
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                            <Button Content="Dialog..." Style="{StaticResource WebStormGhostButton}"
+                                                    Click="OnToolbarCommitClicked" Height="26" Padding="8,2" Margin="0,0,4,0" ToolTip="Open WebStorm Commit Dialog (Ctrl+K)"/>
+                                            <Button x:Name="BtnCommit" Content="Commit" Style="{StaticResource WebStormButton}"
+                                                    Click="OnCommitClicked" Height="26" Padding="14,2" FontWeight="SemiBold"/>
+                                        </StackPanel>
                                     </Grid>
                                 </Grid>
                             </Border>

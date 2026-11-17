@@ -39,6 +39,10 @@ public record GitChange(string Status, string Path, bool IsStaged);
 
 public record GitFileEntry(string Status, string Path);
 
+public record GitRemote(string Name, string Url);
+
+public record GitProviderInfo(string Name, string Hint, string Icon);
+
 public class GitService
 {
     private readonly string _gitExe;
@@ -79,6 +83,7 @@ public class GitService
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
 
         foreach (var arg in args)
         {
@@ -87,6 +92,43 @@ public class GitService
 
         using var process = new Process { StartInfo = psi };
         process.Start();
+
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+
+        await process.WaitForExitAsync();
+        string stdout = await stdoutTask;
+        string stderr = await stderrTask;
+
+        return (process.ExitCode, stdout, stderr);
+    }
+
+    public async Task<(int ExitCode, string StdOut, string StdErr)> RunGitWithInputAsync(string input, params string[] args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = _gitExe,
+            WorkingDirectory = RepositoryPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+
+        foreach (var arg in args)
+        {
+            psi.ArgumentList.Add(arg);
+        }
+
+        using var process = new Process { StartInfo = psi };
+        process.Start();
+
+        await process.StandardInput.WriteAsync(input);
+        process.StandardInput.Close();
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
@@ -200,24 +242,10 @@ public class GitService
         return 0;
     }
 
-    public async Task<List<GitCommit>> GetCommitsAsync(string? targetRef = null, int max = 300)
+    public static List<GitCommit> ParseCommits(string stdout)
     {
-        var args = new List<string> { "log", "-n", $"{max}", "--date-order" };
-        if (!string.IsNullOrEmpty(targetRef) && targetRef != "ALL")
-        {
-            args.Add(targetRef);
-        }
-        else
-        {
-            args.Add("--all");
-        }
-        args.AddRange(new[] {
-            "--format=%H%x1f%P%x1f%h%x1f%an%x1f%ae%x1f%ct%x1f%s%x1f%d"
-        });
-
-        var (code, stdout, _) = await RunGitAsync(args.ToArray());
         var list = new List<GitCommit>();
-        if (code != 0 || string.IsNullOrWhiteSpace(stdout)) return list;
+        if (string.IsNullOrWhiteSpace(stdout)) return list;
 
         foreach (var line in stdout.Split('\n'))
         {
@@ -258,6 +286,64 @@ public class GitService
             }
         }
         return list;
+    }
+
+    public async Task<List<GitCommit>> GetCommitsAsync(string? targetRef = null, int max = 300)
+    {
+        var args = new List<string> { "log", "-n", $"{max}", "--date-order" };
+        if (!string.IsNullOrEmpty(targetRef) && targetRef != "ALL")
+        {
+            args.Add(targetRef);
+        }
+        else
+        {
+            args.Add("--all");
+        }
+        args.AddRange(new[] {
+            "--format=%H%x1f%P%x1f%h%x1f%an%x1f%ae%x1f%ct%x1f%s%x1f%d"
+        });
+
+        var (code, stdout, _) = await RunGitAsync(args.ToArray());
+        return code == 0 ? ParseCommits(stdout) : new List<GitCommit>();
+    }
+
+    public async Task<List<GitCommit>> GetOutgoingCommitsAsync(string? branch = null, string? remote = null)
+    {
+        string format = "--format=%H%x1f%P%x1f%h%x1f%an%x1f%ae%x1f%ct%x1f%s%x1f%d";
+
+        // 1. Try tracking upstream @{u}..HEAD
+        var (code, stdout, _) = await RunGitAsync("log", "@{u}..HEAD", "--date-order", format);
+        if (code == 0 && !string.IsNullOrWhiteSpace(stdout))
+        {
+            return ParseCommits(stdout);
+        }
+
+        // 2. Try against remote branch (e.g. origin/<branch>..HEAD)
+        string rem = remote ?? await GetDefaultRemoteAsync();
+        string br = branch ?? await GetCurrentBranchAsync();
+        if (!string.IsNullOrEmpty(rem) && !string.IsNullOrEmpty(br) && !br.StartsWith("HEAD"))
+        {
+            var (remoteCode, remoteStdout, _) = await RunGitAsync("log", $"{rem}/{br}..HEAD", "--date-order", format);
+            if (remoteCode == 0 && !string.IsNullOrWhiteSpace(remoteStdout))
+            {
+                return ParseCommits(remoteStdout);
+            }
+        }
+
+        // 3. Fallback: all commits on HEAD not reachable from any remote
+        var (codeFallback, stdoutFallback, _) = await RunGitAsync("log", "HEAD", "--not", "--remotes", "--date-order", format);
+        if (codeFallback == 0 && !string.IsNullOrWhiteSpace(stdoutFallback))
+        {
+            return ParseCommits(stdoutFallback);
+        }
+
+        return new List<GitCommit>();
+    }
+
+    public async Task<int> GetOutgoingCommitCountAsync(string? branch = null, string? remote = null)
+    {
+        var commits = await GetOutgoingCommitsAsync(branch, remote);
+        return commits.Count;
     }
 
     public async Task<List<GitChange>> GetWorkingTreeChangesAsync()
@@ -433,17 +519,232 @@ public class GitService
         return code == 0;
     }
 
-    public async Task<bool> PullAsync(string refName, bool rebase = false)
+    public async Task<List<GitRemote>> GetRemotesAsync()
+    {
+        var (code, stdout, _) = await RunGitAsync("remote", "-v");
+        var list = new List<GitRemote>();
+        if (code != 0 || string.IsNullOrWhiteSpace(stdout)) return list;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in stdout.Split('\n'))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var parts = line.Split(new[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2)
+            {
+                string name = parts[0];
+                string url = parts[1];
+                if (seen.Add(name))
+                {
+                    list.Add(new GitRemote(name, url));
+                }
+            }
+        }
+        return list;
+    }
+
+    public async Task<string> GetDefaultRemoteAsync()
+    {
+        var remotes = await GetRemotesAsync();
+        var origin = remotes.FirstOrDefault(r => r.Name.Equals("origin", StringComparison.OrdinalIgnoreCase));
+        if (origin != null) return origin.Name;
+        return remotes.FirstOrDefault()?.Name ?? "origin";
+    }
+
+    public async Task<string> GetRemoteUrlAsync(string? remoteName = null)
+    {
+        string rem = remoteName ?? await GetDefaultRemoteAsync();
+        var (code, stdout, _) = await RunGitAsync("remote", "get-url", rem);
+        if (code == 0 && !string.IsNullOrWhiteSpace(stdout))
+        {
+            return stdout.Trim();
+        }
+        var remotes = await GetRemotesAsync();
+        return remotes.FirstOrDefault(r => r.Name.Equals(rem, StringComparison.OrdinalIgnoreCase))?.Url ?? "";
+    }
+
+    public static GitProviderInfo DetectGitProvider(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return new GitProviderInfo("Git Server", "Enter your username and password or access token.", "🌐");
+
+        string lower = url.ToLowerInvariant();
+        if (lower.Contains("github.com"))
+        {
+            return new GitProviderInfo("GitHub", "Use your GitHub username and Personal Access Token (PAT). Classic tokens (ghp_) or fine-grained tokens with 'repo' scope are accepted. Account passwords are not supported by GitHub.", "🐙");
+        }
+        if (lower.Contains("gitlab"))
+        {
+            return new GitProviderInfo("GitLab", "Use your GitLab username and Personal Access Token (glpat-) with 'read_repository' and 'write_repository' scopes, or your account password.", "🦊");
+        }
+        if (lower.Contains("gogs") || lower.Contains("gitea"))
+        {
+            return new GitProviderInfo("Gogs / Gitea", "Use your Gogs/Gitea account username and password, or an Application Access Token.", "☕");
+        }
+        if (lower.Contains("bitbucket.org"))
+        {
+            return new GitProviderInfo("Bitbucket", "Use your Bitbucket username and App Password with repository read/write permissions.", "🪣");
+        }
+        if (lower.Contains("azure.com") || lower.Contains("visualstudio.com"))
+        {
+            return new GitProviderInfo("Azure DevOps", "Use your Azure DevOps username and Personal Access Token (PAT) with Code (Read & Write) scope.", "☁");
+        }
+
+        try
+        {
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            {
+                return new GitProviderInfo($"Git Server ({uri.Host})", $"Enter credentials for {uri.Authority}. Supports basic authentication, Personal Access Tokens, and self-hosted instances.", "🌐");
+            }
+        }
+        catch { }
+
+        return new GitProviderInfo("Custom Git Server", "Enter credentials for this repository. Supports basic authentication, Personal Access Tokens, and self-hosted instances.", "🌐");
+    }
+
+    public static bool IsAuthFailure(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return text.Contains("could not read Username", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("could not read Password", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("Authentication failed", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("HTTP Basic: Access denied", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("terminal prompts disabled", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("Permission denied (publickey)", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("The requested URL returned error: 401", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("The requested URL returned error: 403", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("Invalid username or password", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("Repository not found", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsSslFailure(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return text.Contains("SSL certificate problem", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("self signed certificate", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("certificate verify failed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsPushRejectedFailure(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return text.Contains("[rejected]", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("fetch first", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("non-fast-forward", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsConflictFailure(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return text.Contains("CONFLICT", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("Automatic merge failed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public async Task<bool> ApproveCredentialsAsync(string url, string username, string password)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"protocol={uri.Scheme}");
+        sb.AppendLine($"host={uri.Authority}");
+        sb.AppendLine($"username={username}");
+        sb.AppendLine($"password={password}");
+        sb.AppendLine();
+
+        var (code, _, _) = await RunGitWithInputAsync(sb.ToString(), "credential", "approve");
+        return code == 0;
+    }
+
+    public async Task<bool> RejectCredentialsAsync(string url, string username)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"protocol={uri.Scheme}");
+        sb.AppendLine($"host={uri.Authority}");
+        sb.AppendLine($"username={username}");
+        sb.AppendLine();
+
+        var (code, _, _) = await RunGitWithInputAsync(sb.ToString(), "credential", "reject");
+        return code == 0;
+    }
+
+    public async Task<bool> SetSslVerifyAsync(bool verify)
+    {
+        var (code, _, _) = await RunGitAsync("config", "--local", "http.sslVerify", verify ? "true" : "false");
+        return code == 0;
+    }
+
+    public async Task<(bool Success, string Output, string Error)> PullWithDetailsAsync(
+        string? targetRef = null,
+        bool rebase = false,
+        string? remote = null)
     {
         var args = new List<string> { "pull" };
         if (rebase) args.Add("--rebase");
-        if (refName.StartsWith("origin/"))
+
+        if (string.IsNullOrWhiteSpace(targetRef))
         {
-            args.Add("origin");
-            args.Add(refName.Substring(7));
+            var (uCode, uStdout, _) = await RunGitAsync("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}");
+            if (uCode != 0 || string.IsNullOrWhiteSpace(uStdout))
+            {
+                string rem = remote ?? await GetDefaultRemoteAsync();
+                string curr = await GetCurrentBranchAsync();
+                if (!string.IsNullOrEmpty(rem) && !string.IsNullOrEmpty(curr) && !curr.StartsWith("HEAD"))
+                {
+                    args.Add(rem);
+                    args.Add(curr);
+                }
+            }
         }
-        var (code, _, _) = await RunGitAsync(args.ToArray());
-        return code == 0;
+        else if (targetRef.Contains('/'))
+        {
+            var remotes = await GetRemotesAsync();
+            var matched = remotes.FirstOrDefault(r => targetRef.StartsWith(r.Name + "/"));
+            if (matched != null)
+            {
+                args.Add(matched.Name);
+                args.Add(targetRef.Substring(matched.Name.Length + 1));
+            }
+            else if (targetRef.StartsWith("origin/"))
+            {
+                args.Add("origin");
+                args.Add(targetRef.Substring(7));
+            }
+            else
+            {
+                int slash = targetRef.IndexOf('/');
+                args.Add(targetRef.Substring(0, slash));
+                args.Add(targetRef.Substring(slash + 1));
+            }
+        }
+        else
+        {
+            if (rebase)
+            {
+                var (rCode, rOut, rErr) = await RunGitAsync("rebase", targetRef);
+                return (rCode == 0, rOut, rErr);
+            }
+            else
+            {
+                var (mCode, mOut, mErr) = await RunGitAsync("merge", targetRef);
+                return (mCode == 0, mOut, mErr);
+            }
+        }
+
+        var (code, stdout, stderr) = await RunGitAsync(args.ToArray());
+        return (code == 0, stdout, stderr);
+    }
+
+    public async Task<bool> PullAsync(string refName, bool rebase = false)
+    {
+        var (ok, _, _) = await PullWithDetailsAsync(refName, rebase);
+        return ok;
     }
 
     public async Task<bool> DeleteBranchAsync(string refName, bool force = false)
@@ -590,14 +891,40 @@ public class GitService
         return code == 0;
     }
 
-    public async Task<bool> PushAsync(string? branch = null)
+    public async Task<(bool Success, string Output, string Error)> PushWithDetailsAsync(
+        string? branch = null,
+        string? remote = null,
+        bool forceWithLease = false,
+        bool pushTags = false,
+        bool setUpstream = false)
     {
         var args = new List<string> { "push" };
-        if (!string.IsNullOrEmpty(branch))
+        if (forceWithLease) args.Add("--force-with-lease");
+        if (pushTags) args.Add("--tags");
+
+        string rem = remote ?? await GetDefaultRemoteAsync();
+        string br = branch ?? await GetCurrentBranchAsync();
+
+        // Check if upstream exists
+        var (uCode, _, _) = await RunGitAsync("rev-parse", "--abbrev-ref", "@{u}");
+        if (uCode != 0 || setUpstream)
         {
-            args.AddRange(new[] { "origin", branch });
+            args.Add("-u");
         }
-        var (code, _, _) = await RunGitAsync(args.ToArray());
-        return code == 0;
+
+        if (!string.IsNullOrEmpty(rem) && !string.IsNullOrEmpty(br) && !br.StartsWith("HEAD"))
+        {
+            args.Add(rem);
+            args.Add(br);
+        }
+
+        var (code, stdout, stderr) = await RunGitAsync(args.ToArray());
+        return (code == 0, stdout, stderr);
+    }
+
+    public async Task<bool> PushAsync(string? branch = null)
+    {
+        var (ok, _, _) = await PushWithDetailsAsync(branch);
+        return ok;
     }
 }

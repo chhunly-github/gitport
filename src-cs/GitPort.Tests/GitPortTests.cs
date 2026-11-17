@@ -382,4 +382,70 @@ index 1234567..89abcdef 100644
         var changes = await git.GetWorkingTreeChangesAsync();
         Assert.NotNull(changes);
     }
+
+    [Theory]
+    [InlineData("https://github.com/owner/repo.git", "GitHub")]
+    [InlineData("https://gitlab.com/group/project.git", "GitLab")]
+    [InlineData("http://gitlab.internal.corp/team/repo.git", "GitLab")]
+    [InlineData("http://192.168.1.100:3000/gogs-user/repo.git", "Gogs / Gitea")]
+    [InlineData("https://gitea.mycompany.org/code/app.git", "Gogs / Gitea")]
+    [InlineData("https://bitbucket.org/team/repo.git", "Bitbucket")]
+    [InlineData("https://dev.azure.com/org/proj/_git/repo", "Azure DevOps")]
+    [InlineData("https://git.custom-host.com/repo.git", "Git Server (git.custom-host.com)")]
+    public void TestGitService_DetectGitProvider(string url, string expectedProvider)
+    {
+        var provider = GitService.DetectGitProvider(url);
+        Assert.Equal(expectedProvider, provider.Name);
+    }
+
+    [Theory]
+    [InlineData("fatal: Authentication failed for 'https://github.com/foo/bar.git'", true)]
+    [InlineData("fatal: could not read Username for 'https://github.com': terminal prompts disabled", true)]
+    [InlineData("remote: HTTP Basic: Access denied", true)]
+    [InlineData("fatal: unable to access 'https://git.corp.net/': The requested URL returned error: 401", true)]
+    [InlineData("fatal: unable to access 'https://git.corp.net/': The requested URL returned error: 403", true)]
+    [InlineData("Permission denied (publickey)", true)]
+    [InlineData("Already up to date.", false)]
+    [InlineData("error: failed to push some refs", false)]
+    public void TestGitService_IsAuthFailure(string message, bool expected)
+    {
+        Assert.Equal(expected, GitService.IsAuthFailure(message));
+    }
+
+    [Theory]
+    [InlineData("fatal: unable to access 'https://192.168.1.50/': SSL certificate problem: self signed certificate", true)]
+    [InlineData("fatal: unable to access: certificate verify failed", true)]
+    [InlineData("Everything up-to-date", false)]
+    public void TestGitService_IsSslFailure(string message, bool expected)
+    {
+        Assert.Equal(expected, GitService.IsSslFailure(message));
+    }
+
+    [Theory]
+    [InlineData("error: failed to push some refs to 'origin'\nUpdates were rejected because the remote contains work that you do not have locally.\nHint: fetch first", true)]
+    [InlineData("To https://github.com/user/repo.git\n ! [rejected]        main -> main (non-fast-forward)", true)]
+    [InlineData("Everything up-to-date", false)]
+    public void TestGitService_IsPushRejectedFailure(string message, bool expected)
+    {
+        Assert.Equal(expected, GitService.IsPushRejectedFailure(message));
+    }
+
+    [Fact]
+    public void TestGitService_ParseCommits()
+    {
+        string rawLog = "c1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0\u001f\u001fc1a2b3c\u001fAlice\u001falice@test.com\u001f1700000000\u001fFeature commit\u001f (HEAD -> main)\n" +
+                        "d1e2f3a4b5c6d7e8f9a0c1a2b3c4d5e6f7a8b9c0\u001fc1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0\u001fd1e2f3a\u001fBob\u001fbob@test.com\u001f1699900000\u001fInitial commit\u001f";
+
+        var commits = GitService.ParseCommits(rawLog);
+
+        Assert.Equal(2, commits.Count);
+        Assert.Equal("c1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0", commits[0].Hash);
+        Assert.Equal("c1a2b3c", commits[0].ShortHash);
+        Assert.Equal("Alice", commits[0].Author);
+        Assert.Equal("Feature commit", commits[0].Subject);
+        Assert.Equal("(HEAD -> main)", commits[0].Refs);
+
+        Assert.Equal("Bob", commits[1].Author);
+        Assert.Equal("Initial commit", commits[1].Subject);
+    }
 }
