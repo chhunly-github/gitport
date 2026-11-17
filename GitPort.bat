@@ -1,2 +1,2 @@
 @echo off
-start "" "%~dp0dist\GitPort-WPF\GitPort.exe" %*
+start "" "%~dp0dist\GitPort\GitPort.exe" %*

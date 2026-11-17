@@ -1,1 +1,0 @@
-SOURCE PROJECT ONLY. The runnable standalone app with bundled Java and Git is in the local dist/GitPort folder. Build with Build.ps1 -Jdk <JDK> -Package -GitSource <complete Git distribution>.
