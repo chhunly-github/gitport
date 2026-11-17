@@ -14,7 +14,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <SplashScreen Include="..\..\assets\splashscreen-960x540.png" Link="Brand\splashscreen.png" />
+    <SplashScreen Include="splashscreen.png" />
   </ItemGroup>
 
 </Project>
