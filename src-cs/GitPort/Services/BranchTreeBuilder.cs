@@ -77,8 +77,6 @@ public class BranchTreeBuilder
                 {
                     worktreeBranchMap[$"refs/heads/{b}"] = wt;
                 }
-                string leaf = b.Contains('/') ? b.Substring(b.LastIndexOf('/') + 1) : b;
-                worktreeBranchMap[leaf] = wt;
             }
             if (!string.IsNullOrEmpty(wt.Branch))
             {
@@ -190,20 +188,12 @@ public class BranchTreeBuilder
             bool isSecondaryWorktree = false;
             string? wtPath = null;
 
-            if (worktreeMap.TryGetValue(b, out var wt))
+            if (!isRemote && worktreeMap.TryGetValue(b, out var wt))
             {
                 if (!wt.IsMain)
                 {
                     isSecondaryWorktree = true;
                     wtPath = wt.Path;
-                }
-            }
-            else if (worktreeMap.TryGetValue(leafName, out var wtLeaf))
-            {
-                if (!wtLeaf.IsMain)
-                {
-                    isSecondaryWorktree = true;
-                    wtPath = wtLeaf.Path;
                 }
             }
 
@@ -219,7 +209,7 @@ public class BranchTreeBuilder
             var leaf = new GitBranchItem
             {
                 Name = leafName,
-                FullRef = isRemote ? (b.StartsWith("origin/") ? b : $"origin/{b}") : b,
+                FullRef = isRemote ? $"refs/remotes/{b}" : b,
                 Kind = isSecondaryWorktree ? BranchItemKind.Worktree : BranchItemKind.Branch,
                 IsCurrent = isCurrent,
                 IsWorktree = isSecondaryWorktree,

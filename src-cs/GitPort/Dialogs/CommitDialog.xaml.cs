@@ -71,7 +71,7 @@ public partial class CommitDialog : Window
             }
 
             PanelNoChanges.Visibility = Visibility.Collapsed;
-            _fileItems = changes.Select(c => new CommitFileItem
+            _fileItems = changes.DistinctBy(c => c.Path).Select(c => new CommitFileItem
             {
                 Path = c.Path,
                 Status = c.Status,
@@ -138,7 +138,7 @@ public partial class CommitDialog : Window
     {
         try
         {
-            _currentRawDiff = await _gitService.GetWorkingTreeFileDiffAsync(filePath, false);
+            _currentRawDiff = await _gitService.GetCommitPreviewDiffAsync(filePath);
             var doc = SideBySideDiffBuilder.Build(_currentRawDiff, filePath);
             UnifiedDiffItemsControl.ItemsSource = doc.UnifiedLines;
         }
@@ -225,18 +225,8 @@ public partial class CommitDialog : Window
 
         try
         {
-            // Stage selected files
-            if (selectedFiles.Count == _fileItems.Count)
-            {
-                await _gitService.StageAllAsync();
-            }
-            else if (selectedFiles.Count > 0)
-            {
-                await _gitService.StageFilesAsync(selectedFiles);
-            }
-
             bool amend = ChkAmend.IsChecked == true;
-            var (ok, output) = await _gitService.CommitAsync(message, amend);
+            var (ok, output) = await _gitService.CommitFilesAsync(message, selectedFiles, amend);
 
             if (!ok)
             {

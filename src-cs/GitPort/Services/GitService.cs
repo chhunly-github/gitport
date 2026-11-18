@@ -35,7 +35,7 @@ public record GitCommit(
     public bool IsWorkingTree => Hash == "WORKING_TREE";
 }
 
-public record GitChange(string Status, string Path, bool IsStaged);
+public record GitChange(string Status, string Path, bool IsStaged, string? OriginalPath = null);
 
 public record GitFileEntry(string Status, string Path);
 
@@ -46,16 +46,97 @@ public record GitProviderInfo(string Name, string Hint, string Icon);
 public class GitService
 {
     private readonly string _gitExe;
+    private readonly ProfileService? _profiles;
+    private readonly Dictionary<string, string> _sessionCredentials = new();
+    public GitProfile? ActiveProfile { get; private set; }
     public string RepositoryPath { get; private set; }
 
-    public GitService(string repoPath, string? gitExe = null)
+    public GitService(string repoPath, string? gitExe = null, ProfileService? profiles = null)
     {
         RepositoryPath = repoPath;
         _gitExe = gitExe ?? FindGitExecutable();
+        _profiles = profiles;
+    }
+
+    public async Task ResolveProfileAsync()
+    {
+        ActiveProfile = null;
+        if (_profiles != null) ActiveProfile = _profiles.Resolve(RepositoryPath, await GetRemoteUrlAsync());
+    }
+
+    public void ClearSessionCredentials() => _sessionCredentials.Clear();
+
+    private void ConfigureProcess(ProcessStartInfo psi)
+    {
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        psi.Environment["GCM_INTERACTIVE"] = "Never";
+        var config = new List<(string Key, string Value)> { ("credential.useHttpPath", "true") };
+        var profile = ActiveProfile;
+        if (profile != null)
+        {
+            if (!string.IsNullOrWhiteSpace(profile.AuthorName)) config.Add(("user.name", profile.AuthorName));
+            if (!string.IsNullOrWhiteSpace(profile.AuthorEmail)) config.Add(("user.email", profile.AuthorEmail));
+            if (!string.IsNullOrWhiteSpace(profile.Username)) config.Add(("credential.username", profile.Username));
+            if (!string.IsNullOrWhiteSpace(profile.SshKeyPath))
+            {
+                string key = profile.SshKeyPath.Replace('\\', '/').Replace("'", "'\\''");
+                psi.Environment["GIT_SSH_COMMAND"] = $"ssh -i '{key}' -o IdentitiesOnly=yes -o BatchMode=yes";
+            }
+            foreach (var entry in profile.Credentials)
+            {
+                try { config.Add(($"http.{entry.Key}.extraHeader", CredentialProtection.Unprotect(entry.Value))); }
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception || ex is FormatException)
+                { /* A copied portable folder may belong to another Windows user. Ask for login again. */ }
+            }
+        }
+        string sessionPrefix = (profile?.Id ?? "") + "|";
+        foreach (var entry in _sessionCredentials.Where(e => e.Key.StartsWith(sessionPrefix, StringComparison.Ordinal)))
+        {
+            string key = $"http.{entry.Key[sessionPrefix.Length..]}.extraHeader";
+            config.RemoveAll(c => c.Key == key);
+            config.Add((key, entry.Value));
+        }
+        if (config.Any(c => c.Key.EndsWith(".extraHeader"))) config.Add(("credential.helper", ""));
+        psi.Environment.TryGetValue("GIT_CONFIG_COUNT", out var inheritedCount);
+        int count = int.TryParse(inheritedCount, out var inherited) ? inherited : 0;
+        foreach (var (key, value) in config)
+        {
+            psi.Environment[$"GIT_CONFIG_KEY_{count}"] = key;
+            psi.Environment[$"GIT_CONFIG_VALUE_{count++}"] = value;
+        }
+        psi.Environment["GIT_CONFIG_COUNT"] = count.ToString();
+    }
+
+    public Task SetCredentialsAsync(string url, string username, string password, bool remember)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != "http" && uri.Scheme != "https"))
+            throw new ArgumentException("Username/password login requires an HTTP or HTTPS remote. Configure an SSH key in Profiles for SSH remotes.");
+        if (username.Contains(':') || username.Any(char.IsControl) || password.Any(char.IsControl))
+            throw new ArgumentException("Credentials contain unsupported characters.");
+        string context = new UriBuilder(uri) { UserName = "", Password = "", Query = "", Fragment = "" }.Uri.AbsoluteUri.TrimEnd('/');
+        string header = "Authorization: Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(username + ":" + password));
+        if (remember && _profiles != null)
+        {
+            if (ActiveProfile == null)
+            {
+                ActiveProfile = new GitProfile { Name = Path.GetFileName(RepositoryPath), Username = username };
+                _profiles.Profiles.Add(ActiveProfile);
+                _profiles.Assign(RepositoryPath, ActiveProfile);
+            }
+            ActiveProfile.Credentials[context] = CredentialProtection.Protect(header);
+            _profiles.Save();
+        }
+        _sessionCredentials[(ActiveProfile?.Id ?? "") + "|" + context] = header;
+        return Task.CompletedTask;
     }
 
     public void SetRepository(string repoPath)
     {
+        if (!string.Equals(RepositoryPath, repoPath, StringComparison.OrdinalIgnoreCase))
+        {
+            ActiveProfile = null;
+            _sessionCredentials.Clear();
+        }
         RepositoryPath = repoPath;
     }
 
@@ -83,7 +164,7 @@ public class GitService
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
-        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        ConfigureProcess(psi);
 
         foreach (var arg in args)
         {
@@ -117,7 +198,7 @@ public class GitService
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
-        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        ConfigureProcess(psi);
 
         foreach (var arg in args)
         {
@@ -127,11 +208,10 @@ public class GitService
         using var process = new Process { StartInfo = psi };
         process.Start();
 
-        await process.StandardInput.WriteAsync(input);
-        process.StandardInput.Close();
-
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
+        await process.StandardInput.WriteAsync(input);
+        process.StandardInput.Close();
 
         await process.WaitForExitAsync();
         string stdout = await stdoutTask;
@@ -234,7 +314,7 @@ public class GitService
 
     public async Task<int> GetIncomingCountAsync(string branch)
     {
-        var (code, stdout, _) = await RunGitAsync("rev-list", "--count", $"{branch}..origin/{branch}");
+        var (code, stdout, _) = await RunGitAsync("rev-list", "--count", $"{branch}..{branch}@{{upstream}}");
         if (code == 0 && int.TryParse(stdout.Trim(), out int count))
         {
             return count;
@@ -290,7 +370,7 @@ public class GitService
 
     public async Task<List<GitCommit>> GetCommitsAsync(string? targetRef = null, int max = 300)
     {
-        var args = new List<string> { "log", "-n", $"{max}", "--date-order" };
+        var args = new List<string> { "log", "-n", $"{max}", "--topo-order" };
         if (!string.IsNullOrEmpty(targetRef) && targetRef != "ALL")
         {
             args.Add(targetRef);
@@ -313,7 +393,7 @@ public class GitService
 
         // 1. Try tracking upstream @{u}..HEAD
         var (code, stdout, _) = await RunGitAsync("log", "@{u}..HEAD", "--date-order", format);
-        if (code == 0 && !string.IsNullOrWhiteSpace(stdout))
+        if (code == 0 && branch == null && remote == null)
         {
             return ParseCommits(stdout);
         }
@@ -324,14 +404,16 @@ public class GitService
         if (!string.IsNullOrEmpty(rem) && !string.IsNullOrEmpty(br) && !br.StartsWith("HEAD"))
         {
             var (remoteCode, remoteStdout, _) = await RunGitAsync("log", $"{rem}/{br}..HEAD", "--date-order", format);
-            if (remoteCode == 0 && !string.IsNullOrWhiteSpace(remoteStdout))
+            if (remoteCode == 0)
             {
                 return ParseCommits(remoteStdout);
             }
         }
 
         // 3. Fallback: all commits on HEAD not reachable from any remote
-        var (codeFallback, stdoutFallback, _) = await RunGitAsync("log", "HEAD", "--not", "--remotes", "--date-order", format);
+        var (codeFallback, stdoutFallback, _) = branch != null || remote != null
+            ? await RunGitAsync("log", "HEAD", "--date-order", format)
+            : await RunGitAsync("log", "HEAD", "--not", "--remotes", "--date-order", format);
         if (codeFallback == 0 && !string.IsNullOrWhiteSpace(stdoutFallback))
         {
             return ParseCommits(stdoutFallback);
@@ -348,37 +430,46 @@ public class GitService
 
     public async Task<List<GitChange>> GetWorkingTreeChangesAsync()
     {
-        var (code, stdout, _) = await RunGitAsync("status", "--porcelain=v1");
-        var list = new List<GitChange>();
-        if (code != 0 || string.IsNullOrWhiteSpace(stdout)) return list;
+        var (code, stdout, _) = await RunGitAsync("status", "--porcelain=v1", "-z", "--untracked-files=all");
+        return code == 0 ? ParseWorkingTreeChanges(stdout) : new List<GitChange>();
+    }
 
-        foreach (var line in stdout.Split('\n'))
+    public static List<GitChange> ParseWorkingTreeChanges(string stdout)
+    {
+        var list = new List<GitChange>();
+        var entries = stdout.Split('\0');
+        for (int i = 0; i < entries.Length; i++)
         {
+            string line = entries[i];
             if (line.Length < 4) continue;
-            string xy = line.Substring(0, 2);
-            string path = line.Substring(3).Trim();
-            list.Add(new GitChange(xy.Trim(), path, xy[0] != ' ' && xy[0] != '?'));
+            string xy = line[..2];
+            string path = line[3..];
+            string? originalPath = null;
+            if ((xy.Contains('R') || xy.Contains('C')) && i + 1 < entries.Length) originalPath = entries[++i];
+            if (xy == "??") list.Add(new GitChange("??", path, false));
+            else if (xy.Contains('U') || xy is "AA" or "DD") list.Add(new GitChange(xy, path, false));
+            else
+            {
+                if (xy[0] != ' ') list.Add(new GitChange(xy[0].ToString(), path, true, originalPath));
+                if (xy[1] != ' ') list.Add(new GitChange(xy[1].ToString(), path, false));
+            }
         }
         return list;
     }
 
     public async Task<List<GitFileEntry>> GetCommitFilesAsync(string commitHash)
     {
-        var (code, stdout, _) = await RunGitAsync("show", "--name-status", "--oneline", "-M", "-C", commitHash);
+        var (code, stdout, _) = await RunGitAsync("diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-M", "--first-parent", "-m", "-z", commitHash);
         var list = new List<GitFileEntry>();
         if (code != 0 || string.IsNullOrWhiteSpace(stdout)) return list;
 
-        var lines = stdout.Split('\n');
-        for (int i = 1; i < lines.Length; i++)
+        var fields = stdout.Split('\0');
+        for (int i = 0; i + 1 < fields.Length;)
         {
-            string line = lines[i].Trim();
-            if (string.IsNullOrEmpty(line)) continue;
-            var tokens = line.Split('\t', 2);
-            if (tokens.Length < 2) tokens = line.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-            if (tokens.Length == 2)
-            {
-                list.Add(new GitFileEntry(tokens[0].Trim(), tokens[1].Trim()));
-            }
+            string status = fields[i++];
+            string path = fields[i++];
+            if ((status.StartsWith('R') || status.StartsWith('C')) && i < fields.Length) path = fields[i++];
+            if (status.Length > 0 && path.Length > 0) list.Add(new GitFileEntry(status, path));
         }
         return list;
     }
@@ -409,10 +500,21 @@ public class GitService
         return code == 0 ? stdout : (string.IsNullOrEmpty(stdout) ? stderr : stdout);
     }
 
+    public async Task<string> CompareAsync(string fromRef, string? toRef = null)
+    {
+        var args = new List<string> { "diff", fromRef };
+        if (toRef != null) args.Add(toRef);
+        args.Add("--");
+        var (code, stdout, stderr) = await RunGitAsync(args.ToArray());
+        return code == 0 ? stdout : stderr;
+    }
+
     public async Task<bool> SwitchBranchAsync(string refName)
     {
         var args = new List<string> { "switch" };
-        if (refName.StartsWith("origin/"))
+        var remotes = await GetRemotesAsync();
+        if (refName.StartsWith("refs/remotes/")) refName = refName[13..];
+        if (remotes.Any(r => refName.StartsWith(r.Name + "/", StringComparison.Ordinal)))
         {
             args.Add("--track");
         }
@@ -489,17 +591,12 @@ public class GitService
     {
         if (fetchFirst)
         {
-            string remote = "origin";
-            string branch = refName;
-            if (refName.StartsWith("origin/"))
-            {
-                branch = refName.Substring(7);
-            }
-            else if (refName.StartsWith("refs/remotes/origin/"))
-            {
-                branch = refName.Substring(20);
-            }
-            await RunGitAsync("fetch", remote, branch);
+            string shortRef = refName.StartsWith("refs/remotes/") ? refName[13..] : refName;
+            var remotes = await GetRemotesAsync();
+            var remote = remotes.FirstOrDefault(r => shortRef.StartsWith(r.Name + "/", StringComparison.Ordinal));
+            if (remote == null) return (false, "Cannot determine the remote for " + refName);
+            var fetch = await FetchWithDetailsAsync(remote.Name);
+            if (!fetch.Success) return (false, fetch.Error + fetch.Output);
         }
 
         var (code, stdout, stderr) = await RunGitAsync("merge", refName);
@@ -546,21 +643,35 @@ public class GitService
     public async Task<string> GetDefaultRemoteAsync()
     {
         var remotes = await GetRemotesAsync();
+        string branch = await GetCurrentBranchAsync();
+        var (code, configured, _) = await RunGitAsync("config", "--get", $"branch.{branch}.remote");
+        if (code == 0 && remotes.Any(r => r.Name == configured.Trim())) return configured.Trim();
         var origin = remotes.FirstOrDefault(r => r.Name.Equals("origin", StringComparison.OrdinalIgnoreCase));
         if (origin != null) return origin.Name;
         return remotes.FirstOrDefault()?.Name ?? "origin";
     }
 
-    public async Task<string> GetRemoteUrlAsync(string? remoteName = null)
+    public async Task<string> GetRemoteUrlAsync(string? remoteName = null, bool forPush = false)
     {
         string rem = remoteName ?? await GetDefaultRemoteAsync();
-        var (code, stdout, _) = await RunGitAsync("remote", "get-url", rem);
+        var (code, stdout, _) = forPush
+            ? await RunGitAsync("remote", "get-url", "--push", rem)
+            : await RunGitAsync("remote", "get-url", rem);
         if (code == 0 && !string.IsNullOrWhiteSpace(stdout))
         {
             return stdout.Trim();
         }
         var remotes = await GetRemotesAsync();
         return remotes.FirstOrDefault(r => r.Name.Equals(rem, StringComparison.OrdinalIgnoreCase))?.Url ?? "";
+    }
+
+    public async Task<string> GetPushTargetBranchAsync(string remote)
+    {
+        string current = await GetCurrentBranchAsync();
+        var (_, configuredRemote, _) = await RunGitAsync("config", "--get", $"branch.{current}.remote");
+        var (code, merge, _) = await RunGitAsync("config", "--get", $"branch.{current}.merge");
+        return code == 0 && configuredRemote.Trim() == remote && merge.Trim().StartsWith("refs/heads/")
+            ? merge.Trim()[11..] : current;
     }
 
     public static GitProviderInfo DetectGitProvider(string url)
@@ -674,9 +785,10 @@ public class GitService
         return code == 0;
     }
 
-    public async Task<bool> SetSslVerifyAsync(bool verify)
+    public async Task<bool> SetSslVerifyAsync(bool verify, string? remoteUrl = null)
     {
-        var (code, _, _) = await RunGitAsync("config", "--local", "http.sslVerify", verify ? "true" : "false");
+        string key = remoteUrl == null ? "http.sslVerify" : $"http.{remoteUrl}.sslVerify";
+        var (code, _, _) = await RunGitAsync("config", "--local", key, verify ? "true" : "false");
         return code == 0;
     }
 
@@ -685,8 +797,10 @@ public class GitService
         bool rebase = false,
         string? remote = null)
     {
+        if (targetRef?.StartsWith("refs/remotes/") == true) targetRef = targetRef[13..];
         var args = new List<string> { "pull" };
         if (rebase) args.Add("--rebase");
+        else args.Add("--no-rebase");
 
         if (string.IsNullOrWhiteSpace(targetRef))
         {
@@ -711,16 +825,10 @@ public class GitService
                 args.Add(matched.Name);
                 args.Add(targetRef.Substring(matched.Name.Length + 1));
             }
-            else if (targetRef.StartsWith("origin/"))
-            {
-                args.Add("origin");
-                args.Add(targetRef.Substring(7));
-            }
             else
             {
-                int slash = targetRef.IndexOf('/');
-                args.Add(targetRef.Substring(0, slash));
-                args.Add(targetRef.Substring(slash + 1));
+                var (localCode, localOut, localErr) = await RunGitAsync(rebase ? "rebase" : "merge", targetRef);
+                return (localCode == 0, localOut, localErr);
             }
         }
         else
@@ -774,7 +882,11 @@ public class GitService
     {
         var list = paths.ToList();
         if (list.Count == 0) return true;
-        var args = new List<string> { "restore", "--staged", "--" };
+        var renames = (await GetWorkingTreeChangesAsync()).Where(c => c.IsStaged && c.Status == "R" && list.Contains(c.Path));
+        list.AddRange(renames.Where(c => c.OriginalPath != null).Select(c => c.OriginalPath!));
+        bool hasHead = !string.IsNullOrEmpty(await GetHeadCommitHashAsync());
+        var args = hasHead ? new List<string> { "restore", "--staged", "--" }
+            : new List<string> { "rm", "--cached", "-r", "--" };
         args.AddRange(list);
         var (code, _, _) = await RunGitAsync(args.ToArray());
         return code == 0;
@@ -782,7 +894,10 @@ public class GitService
 
     public async Task<bool> UnstageAllAsync()
     {
-        var (code, _, _) = await RunGitAsync("restore", "--staged", ".");
+        bool hasHead = !string.IsNullOrEmpty(await GetHeadCommitHashAsync());
+        var (code, _, _) = hasHead
+            ? await RunGitAsync("restore", "--staged", ":/")
+            : await RunGitAsync("rm", "--cached", "-r", "--", ":/");
         return code == 0;
     }
 
@@ -790,15 +905,16 @@ public class GitService
     {
         var list = paths.ToList();
         if (list.Count == 0) return true;
-        var args = new List<string> { "restore", "--" };
-        args.AddRange(list);
-        await RunGitAsync(args.ToArray());
-
-        var cleanArgs = new List<string> { "clean", "-f", "--" };
-        cleanArgs.AddRange(list);
-        await RunGitAsync(cleanArgs.ToArray());
-
-        return true;
+        bool success = true;
+        foreach (string path in list)
+        {
+            var (tracked, _, _) = await RunGitAsync("ls-files", "--error-unmatch", "--", path);
+            var (code, _, _) = tracked == 0
+                ? await RunGitAsync("restore", "--", path)
+                : await RunGitAsync("clean", "-f", "--", path);
+            success &= code == 0;
+        }
+        return success;
     }
 
     public async Task<(bool Success, string Output)> CommitAsync(string message, bool amend = false)
@@ -809,6 +925,40 @@ public class GitService
         args.AddRange(new[] { "-m", message });
         var (code, stdout, stderr) = await RunGitAsync(args.ToArray());
         return (code == 0, code == 0 ? stdout : (string.IsNullOrWhiteSpace(stderr) ? stdout : stderr));
+    }
+
+    public async Task<(bool Success, string Output)> CommitFilesAsync(string message, IEnumerable<string> paths, bool amend = false)
+    {
+        var selected = paths.Distinct().ToList();
+        if (string.IsNullOrWhiteSpace(message)) return (false, "Commit message cannot be empty.");
+        if (selected.Count == 0 && !amend) return (false, "Select at least one file.");
+        var renameSources = (await GetWorkingTreeChangesAsync())
+            .Where(c => c.IsStaged && c.Status == "R" && selected.Contains(c.Path) && c.OriginalPath != null)
+            .Select(c => c.OriginalPath!).ToList();
+        if (selected.Count > 0 && !await StageFilesAsync(selected)) return (false, "Could not stage the selected files.");
+        selected.AddRange(renameSources);
+        var args = new List<string> { "commit", "--only", "-m", message };
+        if (amend) args.Add("--amend");
+        if (selected.Count == 0) args.Add("--allow-empty");
+        args.Add("--");
+        args.AddRange(selected);
+        var (code, stdout, stderr) = await RunGitAsync(args.ToArray());
+        return (code == 0, code == 0 ? stdout : stderr);
+    }
+
+    public async Task<string> GetCommitPreviewDiffAsync(string filePath)
+    {
+        if (!string.IsNullOrEmpty(await GetHeadCommitHashAsync()))
+        {
+            var (code, stdout, _) = await RunGitAsync("diff", "HEAD", "--", filePath);
+            if (code == 0 && stdout.Length > 0) return stdout;
+        }
+        else
+        {
+            string staged = await GetWorkingTreeFileDiffAsync(filePath, true);
+            if (staged.Length > 0) return staged;
+        }
+        return await GetWorkingTreeFileDiffAsync(filePath, false);
     }
 
     public async Task<string> GetWorkingTreeFileDiffAsync(string filePath, bool staged)
@@ -822,6 +972,8 @@ public class GitService
         {
             var (code, stdout, stderr) = await RunGitAsync("diff", "--", filePath);
             if (code == 0 && !string.IsNullOrWhiteSpace(stdout)) return stdout;
+            var (tracked, _, _) = await RunGitAsync("ls-files", "--error-unmatch", "--", filePath);
+            if (tracked == 0) return code == 0 ? stdout : stderr;
 
             string fullPath = Path.Combine(RepositoryPath, filePath);
             if (File.Exists(fullPath))
@@ -853,6 +1005,12 @@ public class GitService
     {
         var (code, _, _) = await RunGitAsync("fetch", "--all", "--prune");
         return code == 0;
+    }
+
+    public async Task<(bool Success, string Output, string Error)> FetchWithDetailsAsync(string remote)
+    {
+        var (code, stdout, stderr) = await RunGitAsync("fetch", "--prune", remote);
+        return (code == 0, stdout, stderr);
     }
 
     public async Task<bool> RenameBranchAsync(string oldName, string newName)
@@ -903,7 +1061,10 @@ public class GitService
         if (pushTags) args.Add("--tags");
 
         string rem = remote ?? await GetDefaultRemoteAsync();
-        string br = branch ?? await GetCurrentBranchAsync();
+        string br = branch ?? await GetPushTargetBranchAsync(rem);
+        if (string.IsNullOrEmpty(await GetHeadCommitHashAsync())) return (false, "", "Create a commit before pushing.");
+        var (branchCode, _, _) = await RunGitAsync("check-ref-format", "refs/heads/" + br);
+        if (branchCode != 0) return (false, "", "The destination branch name is invalid.");
 
         // Check if upstream exists
         var (uCode, _, _) = await RunGitAsync("rev-parse", "--abbrev-ref", "@{u}");
@@ -912,10 +1073,10 @@ public class GitService
             args.Add("-u");
         }
 
-        if (!string.IsNullOrEmpty(rem) && !string.IsNullOrEmpty(br) && !br.StartsWith("HEAD"))
+        if (!string.IsNullOrEmpty(rem) && !string.IsNullOrEmpty(br))
         {
             args.Add(rem);
-            args.Add(br);
+            args.Add($"HEAD:refs/heads/{br}");
         }
 
         var (code, stdout, stderr) = await RunGitAsync(args.ToArray());

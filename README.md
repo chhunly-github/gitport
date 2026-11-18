@@ -4,9 +4,45 @@
 
 GitPort combines the intuitive repository and branch workflow of **SourceTree** with the precision, visual elegance, and muscle of **JetBrains WebStorm’s** Git Log, branch graph, and side-by-side diff engine.
 
-Designed for developers who demand a standalone, portable Git GUI with zero host machine dependencies or intrusive background services.
+Designed as a portable Git GUI for Windows. The standard build requires the .NET 10 Desktop Runtime; the release folder includes Git for Windows.
 
 ---
+
+## Functionality review (November 2026)
+
+The application targets **.NET 10 on Windows**. The automated suite exercises disposable repositories and a loopback Git smart HTTP server; it does not connect to your production repositories or accounts.
+
+| Workflow | Review result |
+|---|---|
+| History, graph, branch tree, file tree, unified and side-by-side diff | Existing implementations; graph/tree/diff tests pass. History now uses topological order. |
+| Stage, unstage, commit, amend | Implemented. Fixed partially staged files, Unicode/space paths, renames, unstage before the first commit, and unchecked staged files being included by the commit dialog. |
+| Fetch, pull, push | Tested locally over authenticated plain HTTP and against a named remote. Fixed misleading fetch success, session login, destination branch handling, upstream defaults, and remote branch references. |
+| Branch create/switch/rename/delete, merge, rebase, cherry-pick, revert, tags, reset | Git operations exercised by integration tests. Fixed nested branch references and comparison actions. Conflicts still require manual resolution. |
+| Worktree create/list/remove | Exercised by integration tests. Fixed branch-name collisions in worktree indicators. |
+| Repository catalog and tabs | Existing implementation, with catalog tests. Each repository now retains its own Git service and login session. |
+| Multiple identities and repository rules | Added. Explicit repository assignment takes precedence over the most specific matching remote rule. |
+| Gogs over HTTP, including custom ports | Authenticated fetch/push/pull verified with Git's smart HTTP backend. Your particular Gogs installation still needs a connection check. |
+| SSH keys | Per-profile key selection added. Live SSH servers, passphrase prompts, and host-key enrollment are not covered by the automated suite. |
+| Clone/init wizard, stash/shelf UI, remote editor, guided conflict resolver, rebase continue/abort | No dedicated UI yet. Use Git externally for these workflows. |
+
+Regex, match-case, and user/date/path filter controls were decorative and have been removed. The working log search matches message, author, hash, and refs; the branch sidebar supplies branch filtering.
+
+### Profiles and automatic repository selection
+
+Click **Profile** in the top-right corner, then **+ New**. Set a profile name, commit author/email, HTTP username, and optionally an SSH private key path. Blank identity fields retain the existing Git configuration.
+
+- **Pin this profile** assigns it to the current repository and restores it whenever that repository opens.
+- For automatic selection, clear the pin and set a remote rule such as `gogs.local:3000` or `http://gogs.local:3000/team`. URL rules match complete path segments; longer rules win. With no match, GitPort uses the existing Git settings.
+- Commit identities are supplied per Git process. Switching profiles does not rewrite repository or global author configuration.
+- Settings live beside the executable in `data/profiles.json`; the existing repository catalog remains in `data/profiles/default/settings.properties`.
+- HTTP login works for the current session with **Remember** cleared. Remembered logins are scoped to the profile and repository URL, encrypted with Windows DPAPI, and restored after restart. They can only be decrypted by the same Windows user; moving the portable folder to another user requires signing in again.
+- **Forget saved logins** removes that profile's stored logins when saved. Build updates preserve runtime data; portable archives exclude it.
+
+### Gogs without SSL
+
+Use the server's actual remote URL, for example `http://192.168.1.50:3000/team/repository.git`. GitPort preserves HTTP and the custom port. Enter your Gogs username and password or access token when fetch, pull, or push requests authentication. An HTTP server does **not** need the SSL bypass option. HTTP transmits credentials without encryption.
+
+Gogs must have HTTP Git enabled and the account must have repository access. See the [Gogs server configuration](https://github.com/gogs/docs/blob/master/en-US/advanced/configuration_cheat_sheet.md) and [Git credential URL scoping](https://git-scm.com/docs/gitcredentials). For HTTPS certificate failures, verification bypass is optional, unchecked by default, and scoped to that remote in repository-local Git configuration.
 
 ## Key Features
 
@@ -42,9 +78,9 @@ Designed for developers who demand a standalone, portable Git GUI with zero host
 - **Repository Catalog:** Manage all repositories in a unified, tabbed interface.
 - **Git Worktree Support:** Create, switch, and inspect independent worktrees without switching branches or stashing in-progress edits.
 
-### 6. Portable & Self-Contained
+### 6. Portable Packaging
 - **Embedded Git Runtime:** Ships with a standalone Git for Windows runtime—no system Git installation or administrative rights required.
-- **Zero Host Registry Pollution:** Profiles, local configurations, and SSH settings stay cleanly isolated within the application folder.
+- **Portable Profile Settings:** Application profiles stay beside the executable. Existing Git configuration and credential helpers remain available when no profile overrides them; SSH still uses the user's host-key trust configuration.
 
 ---
 
@@ -53,7 +89,7 @@ Designed for developers who demand a standalone, portable Git GUI with zero host
 ```
 gitport/
 ├── src-cs/
-│   ├── GitPort/                  # Core WPF application (.NET 8)
+│   ├── GitPort/                  # Core WPF application (.NET 10)
 │   │   ├── Controls/             # Custom CommitGraphControl & UI widgets
 │   │   ├── Dialogs/              # NewWorktree, InputBox dialogs
 │   │   ├── Models/               # GitCommit, GitBranch, Diff, Repo models
@@ -81,7 +117,7 @@ gitport/
 
 #### Prerequisites
 - Windows 10/11 (x64)
-- [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 
 #### Build Commands
 ```powershell

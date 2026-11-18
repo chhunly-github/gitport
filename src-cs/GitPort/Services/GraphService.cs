@@ -25,7 +25,7 @@ public class GraphService
 
     public static Color GetLaneColor(int lane) => Palette[Math.Abs(lane) % Palette.Length];
 
-    public static List<GitCommitItem> BuildGraph(List<GitCommit> commits, string currentBranch, string headCommit)
+    public static List<GitCommitItem> BuildGraph(List<GitCommit> commits, string currentBranch, string headCommit, IEnumerable<string>? remoteNames = null)
     {
         var items = new List<GitCommitItem>();
         if (commits.Count == 0) return items;
@@ -43,7 +43,7 @@ public class GraphService
                           (c.Refs.Contains("HEAD ->") || c.Refs.Contains("HEAD,") || c.Refs == "HEAD");
 
             // Parse refs & chip badges
-            ParseRefs(item, currentBranch);
+            ParseRefs(item, currentBranch, remoteNames ?? new[] { "origin" });
 
             // 1. Check if this commit was expected from a row above
             int lane = activeLanes.IndexOf(c.Hash);
@@ -219,7 +219,7 @@ public class GraphService
         return Palette[lane % Palette.Length];
     }
 
-    private static void ParseRefs(GitCommitItem item, string currentBranch)
+    private static void ParseRefs(GitCommitItem item, string currentBranch, IEnumerable<string> remoteNames)
     {
         string raw = item.Commit.Refs.Trim();
         if (string.IsNullOrEmpty(raw)) return;
@@ -229,6 +229,7 @@ public class GraphService
 
         var localBranches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var remoteBranches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var otherRemoteBranches = new HashSet<string>(StringComparer.Ordinal);
         var tags = new List<string>();
 
         foreach (var p in parts)
@@ -254,6 +255,10 @@ public class GraphService
             else if (token.StartsWith("origin/"))
             {
                 remoteBranches.Add(token.Substring(7).Trim());
+            }
+            else if (remoteNames.Any(remote => token.StartsWith(remote + "/", StringComparison.Ordinal)))
+            {
+                otherRemoteBranches.Add(token);
             }
             else
             {
@@ -297,6 +302,12 @@ public class GraphService
         }
 
         // 3. Remaining local branches
+        foreach (var remote in otherRemoteBranches)
+        {
+            item.RefChips.Add(new RefChip { Name = remote, IsRemote = true, Foreground = lavenderBrush });
+            summaries.Add(remote);
+        }
+
         foreach (var l in localBranches)
         {
             item.RefChips.Add(new RefChip

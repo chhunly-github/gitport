@@ -1,6 +1,8 @@
 param([switch]$Package, [switch]$SkipTests)
 $ErrorActionPreference = 'Stop'
 $project = $PSScriptRoot
+$distDir = Join-Path $project 'dist\GitPort'
+New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
 Write-Host "==> Building GitPort (WPF on .NET)..." -ForegroundColor Cyan
 dotnet build "$project\src-cs\GitPort\GitPort.csproj" -c Release
@@ -29,17 +31,20 @@ if (Test-Path -LiteralPath $csc) {
 
 # Publish to dist\GitPort
 Write-Host "==> Publishing release binaries to dist\GitPort..." -ForegroundColor Cyan
-$distDir = Join-Path $project 'dist\GitPort'
 $tempPublish = Join-Path $env:TEMP ('gitport-publish-' + [guid]::NewGuid().ToString('N'))
 dotnet publish "$project\src-cs\GitPort\GitPort.csproj" -c Release -o $tempPublish
 if ($LASTEXITCODE -ne 0) { throw "Publish failed." }
 
 Copy-Item -Path "$tempPublish\GitPort.*" -Destination $distDir -Force
-Remove-Item -Recurse -Force $tempPublish -ErrorAction SilentlyContinue
+Copy-Item -LiteralPath (Join-Path $project 'README.md'), (Join-Path $project 'THIRD-PARTY.md') -Destination $distDir -Force
+$resolvedPublish = [System.IO.Path]::GetFullPath($tempPublish)
+$expectedPrefix = Join-Path ([System.IO.Path]::GetFullPath($env:TEMP)) 'gitport-publish-'
+if (-not $resolvedPublish.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unexpected publish directory: $resolvedPublish"
+}
+Remove-Item -LiteralPath $resolvedPublish -Recurse -Force -ErrorAction SilentlyContinue
 
-# Clean any runtime data folders
-if (Test-Path (Join-Path $distDir 'data')) { Remove-Item -Recurse -Force (Join-Path $distDir 'data') }
-if (Test-Path (Join-Path $distDir 'temp')) { Remove-Item -Recurse -Force (Join-Path $distDir 'temp') }
+# Preserve runtime data, including repository assignments and encrypted profiles.
 
 Write-Host "==> GitPort ready at: $distDir\GitPort.exe" -ForegroundColor Green
 
@@ -47,12 +52,13 @@ if ($Package) {
     $zipDir = Join-Path $project 'zip'
     New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
 
-    Write-Host "==> Packaging source zip: $zipDir\gitport1.0.zip..." -ForegroundColor Cyan
+    Write-Host "==> Packaging committed source snapshot: $zipDir\gitport1.0.zip..." -ForegroundColor Cyan
     git archive -o "$zipDir\gitport1.0.zip" HEAD
 
     Write-Host "==> Packaging portable zip: $zipDir\gitport1.0-portable.zip..." -ForegroundColor Cyan
     $portableZip = Join-Path $zipDir 'gitport1.0-portable.zip'
     if (Test-Path $portableZip) { Remove-Item -Force $portableZip }
-    Compress-Archive -Path "$distDir\*" -DestinationPath $portableZip -Force
+    $packageFiles = @(Get-ChildItem -LiteralPath $distDir | Where-Object { $_.Name -notin @('data', 'temp') } | Select-Object -ExpandProperty FullName)
+    Compress-Archive -Path $packageFiles -DestinationPath $portableZip -Force
     Write-Host "==> Packages generated successfully in $zipDir" -ForegroundColor Green
 }

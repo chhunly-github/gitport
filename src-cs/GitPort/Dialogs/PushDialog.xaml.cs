@@ -17,6 +17,9 @@ public partial class PushDialog : Window
     private readonly string _currentBranch;
     private List<GitCommit> _outgoingCommits = new();
     private GitCommitItem? _selectedCommit;
+    private bool _initializing = true;
+    private bool _pushing;
+    private int _previewVersion;
 
     public int PushedCommitCount => _outgoingCommits.Count;
 
@@ -45,15 +48,18 @@ public partial class PushDialog : Window
                 {
                     CboRemote.Items.Add(r.Name);
                 }
-                var defaultRemote = remotes.FirstOrDefault(r => r.Name.Equals("origin", StringComparison.OrdinalIgnoreCase))?.Name ?? remotes[0].Name;
+                var defaultRemote = await _gitService.GetDefaultRemoteAsync();
                 CboRemote.SelectedItem = defaultRemote;
+                TxtTargetBranch.Text = await _gitService.GetPushTargetBranchAsync(defaultRemote);
             }
             else
             {
-                CboRemote.Items.Add("origin");
-                CboRemote.SelectedIndex = 0;
+                TxtStatusMessage.Text = "No remotes configured. Add a remote with Git before pushing.";
+                BtnPush.IsEnabled = false;
+                return;
             }
 
+            _initializing = false;
             await LoadOutgoingCommitsAsync();
         }
         catch (Exception ex)
@@ -64,12 +70,15 @@ public partial class PushDialog : Window
 
     private async Task LoadOutgoingCommitsAsync()
     {
+        int version = ++_previewVersion;
         TxtStatusMessage.Text = "Calculating outgoing commits...";
         string remote = CboRemote.SelectedItem?.ToString() ?? "origin";
         string branch = TxtTargetBranch.Text.Trim();
         if (string.IsNullOrEmpty(branch)) branch = _currentBranch;
 
-        _outgoingCommits = await _gitService.GetOutgoingCommitsAsync(branch, remote);
+        var outgoing = await _gitService.GetOutgoingCommitsAsync(branch, remote);
+        if (version != _previewVersion) return;
+        _outgoingCommits = outgoing;
         TxtStatusMessage.Text = "";
 
         if (_outgoingCommits.Count == 0)
@@ -80,7 +89,7 @@ public partial class PushDialog : Window
             TxtCommitCountBadge.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#7EC7A6"));
             BadgeCommitCount.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#7EC7A6"));
             BtnPush.Content = "Push";
-            BtnPush.IsEnabled = true; // Still allow push e.g. for tags or force push
+            BtnPush.IsEnabled = !_pushing;
             ClearCommitDetails();
         }
         else
@@ -93,7 +102,7 @@ public partial class PushDialog : Window
             TxtCommitCountBadge.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#00B8E5"));
             BadgeCommitCount.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#00B8E5"));
             BtnPush.Content = $"Push ({_outgoingCommits.Count})";
-            BtnPush.IsEnabled = true;
+            BtnPush.IsEnabled = !_pushing;
 
             OutgoingCommitsListView.SelectedIndex = 0;
         }
@@ -133,13 +142,40 @@ public partial class PushDialog : Window
 
     private async void OnRemoteSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (IsLoaded)
+        if (IsLoaded && !_initializing)
         {
             await LoadOutgoingCommitsAsync();
         }
     }
 
     private async void OnPushClicked(object sender, RoutedEventArgs e)
+    {
+        if (_pushing) return;
+        _pushing = true;
+        PushContent.IsEnabled = false;
+        LoadingHost.Visibility = Visibility.Visible;
+        CboRemote.IsEnabled = false;
+        TxtTargetBranch.IsEnabled = false;
+        try { await PerformPushAsync(); }
+        catch (Exception ex) { TxtStatusMessage.Text = $"Push failed: {ex.Message}"; }
+        finally
+        {
+            _pushing = false;
+            LoadingHost.Visibility = Visibility.Collapsed;
+            PushContent.IsEnabled = true;
+            CboRemote.IsEnabled = true;
+            TxtTargetBranch.IsEnabled = true;
+            BtnPush.IsEnabled = true;
+            BtnCancel.IsEnabled = true;
+        }
+    }
+
+    private async void OnTargetBranchLostFocus(object sender, RoutedEventArgs e)
+    {
+        if (!_initializing && !_pushing) await LoadOutgoingCommitsAsync();
+    }
+
+    private async Task PerformPushAsync()
     {
         string remote = CboRemote.SelectedItem?.ToString() ?? "origin";
         string branch = TxtTargetBranch.Text.Trim();
@@ -165,23 +201,9 @@ public partial class PushDialog : Window
             if (GitService.IsAuthFailure(error) || GitService.IsSslFailure(error))
             {
                 TxtStatusMessage.Text = "Authentication required...";
-                string remoteUrl = await _gitService.GetRemoteUrlAsync(remote);
-                var authDlg = new CredentialsDialog(remoteUrl, isSslError: GitService.IsSslFailure(error))
+                string remoteUrl = await _gitService.GetRemoteUrlAsync(remote, forPush: true);
+                if (await ConnectionAuthentication.PromptAsync(this, _gitService, remoteUrl, error))
                 {
-                    Owner = this
-                };
-
-                if (authDlg.ShowDialog() == true)
-                {
-                    if (authDlg.DisableSslVerify)
-                    {
-                        await _gitService.SetSslVerifyAsync(false);
-                    }
-                    if (authDlg.RememberCredentials)
-                    {
-                        await _gitService.ApproveCredentialsAsync(remoteUrl, authDlg.Username, authDlg.Password);
-                    }
-
                     TxtStatusMessage.Text = "Retrying push with credentials...";
                     var retry = await _gitService.PushWithDetailsAsync(
                         branch: branch,

@@ -23,6 +23,11 @@ public partial class CredentialsDialog : Window
         TxtProviderName.Text = info.Name;
         TxtProviderHint.Text = info.Hint;
         TxtProviderIcon.Text = info.Icon;
+        if (System.Uri.TryCreate(remoteUrl, System.UriKind.Absolute, out var uri) && uri.Scheme == "http")
+        {
+            TxtProviderHint.Text += "\nHTTP connection: credentials travel without encryption. No SSL bypass is needed.";
+            ChkDisableSslVerify.Visibility = Visibility.Collapsed;
+        }
 
         if (!string.IsNullOrWhiteSpace(defaultUsername))
         {
@@ -37,7 +42,7 @@ public partial class CredentialsDialog : Window
         if (isSslError)
         {
             BannerSslAlert.Visibility = Visibility.Visible;
-            ChkDisableSslVerify.IsChecked = true;
+            ChkDisableSslVerify.IsChecked = false;
             ChkDisableSslVerify.Foreground = System.Windows.Media.Brushes.White;
         }
 

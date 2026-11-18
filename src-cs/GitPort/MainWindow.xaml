@@ -26,6 +26,7 @@
     </Window.Resources>
 
     <Grid>
+    <Grid x:Name="MainContent">
         <Grid.RowDefinitions>
             <!-- ROW 0: SourceTree-style Repository Tabs Bar -->
             <RowDefinition Height="36"/>
@@ -106,6 +107,7 @@
 
                 <!-- Right: Add / Open Repository Button (+) -->
                 <StackPanel Orientation="Horizontal" Grid.Column="2" VerticalAlignment="Center" Margin="0,0,6,4">
+                    <Button x:Name="BtnProfiles" Content="Profiles" Click="OnProfilesClicked" Style="{StaticResource WebStormGhostButton}" Padding="10,2"/>
                     <Button Content="➕" Style="{StaticResource WebStormGhostButton}" Click="OnOpenRepoClicked"
                             ToolTip="Open Repository as New Tab" Padding="6,2" FontSize="12"/>
                 </StackPanel>
@@ -297,13 +299,7 @@
                             <!-- Commit Text/Hash Search -->
                             <TextBox x:Name="TxtCommitFilter" Style="{StaticResource WebStormSearchBox}"
                                      Width="220" VerticalAlignment="Center" TextChanged="OnFilterTextChanged" Height="22"
-                                     Tag="Text or hash"/>
-                            <Button Content="(.*)" Style="{StaticResource WebStormGhostButton}" Padding="4,1" Margin="4,0,2,0" FontSize="11" ToolTip="Regex"/>
-                            <Button Content="Aa" Style="{StaticResource WebStormGhostButton}" Padding="4,1" Margin="0,0,8,0" FontSize="11" ToolTip="Match Case"/>
-                            <TextBlock Text="Branch ▾" Foreground="#8FA8C4" VerticalAlignment="Center" Margin="4,0"/>
-                            <TextBlock Text="User ▾" Foreground="#8FA8C4" VerticalAlignment="Center" Margin="4,0"/>
-                            <TextBlock Text="Date ▾" Foreground="#8FA8C4" VerticalAlignment="Center" Margin="4,0"/>
-                            <TextBlock Text="Paths ▾" Foreground="#8FA8C4" VerticalAlignment="Center" Margin="4,0"/>
+                                     Tag="Search message, author, hash or ref" ToolTip="Search message, author, hash or ref"/>
                         </StackPanel>
 
                         <!-- Right: Actions (Commit, Fetch, Pull, Push, New Worktree, Refresh) -->
@@ -1256,10 +1252,13 @@
                     <TextBlock x:Name="TxtStatusRepo" Text="" Foreground="#6882A0" VerticalAlignment="Center"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Grid.Column="1">
-                    <TextBlock Text="Embedded Git" Foreground="#8FA8C4" Margin="0,0,12,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="Git CLI" Foreground="#8FA8C4" Margin="0,0,12,0" VerticalAlignment="Center"/>
                     <TextBlock Text="UTF-8" Foreground="#8FA8C4" VerticalAlignment="Center"/>
                 </StackPanel>
             </Grid>
         </Border>
+    </Grid>
+        <ctrl:LoadingOverlay x:Name="LoadingHost" Panel.ZIndex="100" Visibility="Collapsed"
+                             Message="{Binding Text, ElementName=TxtStatusMessage}"/>
     </Grid>
 </Window>

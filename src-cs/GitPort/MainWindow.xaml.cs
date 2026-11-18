@@ -22,6 +22,8 @@ public partial class MainWindow : Window
 {
     private GitService _gitService;
     private readonly RepositoryCatalogService _catalog;
+    private readonly ProfileService _profiles = new();
+    private readonly Dictionary<string, GitService> _repositoryServices = new(StringComparer.OrdinalIgnoreCase);
     private readonly ObservableCollection<RepoTabItem> _openTabs = new();
     private RepoTabItem? _activeTab;
 
@@ -451,12 +453,40 @@ public partial class MainWindow : Window
 
     #region Repository Loading
 
+    private int _busyDepth;
+
+    private void BeginLoading()
+    {
+        _busyDepth++;
+        MainContent.IsEnabled = false;
+        LoadingHost.Visibility = Visibility.Visible;
+    }
+
+    private void EndLoading()
+    {
+        if (--_busyDepth > 0) return;
+        _busyDepth = 0;
+        LoadingHost.Visibility = Visibility.Collapsed;
+        MainContent.IsEnabled = true;
+    }
+
     private async Task LoadRepositoryAsync(string repoPath)
     {
         try
         {
             TxtStatusMessage.Text = "Loading repository...";
-            _gitService.SetRepository(repoPath);
+            BeginLoading();
+            if (!_repositoryServices.TryGetValue(repoPath, out var service))
+            {
+                service = new GitService(repoPath, profiles: _profiles);
+                _repositoryServices[repoPath] = service;
+            }
+            _gitService = service;
+            await _gitService.ResolveProfileAsync();
+            BtnProfiles.Content = "Profile: " + (_gitService.ActiveProfile?.Name ?? "Git settings (auto)");
+            BtnProfiles.ToolTip = _gitService.ActiveProfile is { } profile
+                ? $"{profile.AuthorName} <{profile.AuthorEmail}> — click to manage repository profiles"
+                : "Using existing Git identity. Click to create or assign profiles.";
             _catalog.AddRepository(repoPath);
             _catalog.SetLastRepo(repoPath);
 
@@ -507,6 +537,7 @@ public partial class MainWindow : Window
             TxtStatusMessage.Text = $"Error: {ex.Message}";
             MessageBox.Show(this, $"Failed to load repository:\n{ex.Message}", "Git Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+        finally { EndLoading(); }
     }
 
     private async Task LoadCommitsForRefAsync(string targetRef)
@@ -517,7 +548,8 @@ public partial class MainWindow : Window
             _activeFilterRef = targetRef;
 
             var commits = await _gitService.GetCommitsAsync(targetRef, 500);
-            _allCommits = GraphService.BuildGraph(commits, _currentBranch, _headCommitHash);
+            _allCommits = GraphService.BuildGraph(commits, _currentBranch, _headCommitHash,
+                _branchRefs.Where(r => r.StartsWith("refs/remotes/")).Select(r => r[13..].Split('/')[0]).Distinct());
             CommitsListView.ItemsSource = _allCommits;
 
             if (_allCommits.Count > 0)
@@ -919,17 +951,17 @@ public partial class MainWindow : Window
     private async void OnStageAllClicked(object sender, RoutedEventArgs e)
     {
         TxtStatusMessage.Text = "Staging all changes...";
-        await _gitService.StageAllAsync();
+        bool success = await _gitService.StageAllAsync();
         await RefreshWorkingTreeAsync();
-        TxtStatusMessage.Text = "Staged all changes.";
+        TxtStatusMessage.Text = success ? "Staged all changes." : "Could not stage all changes.";
     }
 
     private async void OnUnstageAllClicked(object sender, RoutedEventArgs e)
     {
         TxtStatusMessage.Text = "Unstaging all changes...";
-        await _gitService.UnstageAllAsync();
+        bool success = await _gitService.UnstageAllAsync();
         await RefreshWorkingTreeAsync();
-        TxtStatusMessage.Text = "Unstaged all changes.";
+        TxtStatusMessage.Text = success ? "Unstaged all changes." : "Could not unstage changes.";
     }
 
     private async void OnDiscardSelectedClicked(object sender, RoutedEventArgs e)
@@ -958,9 +990,9 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes)
         {
             TxtStatusMessage.Text = $"Discarding {selected.Count} file(s)...";
-            await _gitService.DiscardFilesAsync(selected);
+            bool success = await _gitService.DiscardFilesAsync(selected);
             await RefreshWorkingTreeAsync();
-            TxtStatusMessage.Text = "Discarded changes.";
+            TxtStatusMessage.Text = success ? "Discarded changes." : "Some changes could not be discarded.";
         }
     }
 
@@ -1056,7 +1088,7 @@ public partial class MainWindow : Window
         if (res == MessageBoxResult.Yes)
         {
             TxtStatusMessage.Text = $"Merging {branchOrRef} into {_currentBranch}...";
-            bool isRemote = branchOrRef.StartsWith("origin/") || branchOrRef.StartsWith("refs/remotes/");
+            bool isRemote = _branchRefs.Contains("refs/remotes/" + branchOrRef) || branchOrRef.StartsWith("refs/remotes/");
             var (ok, output) = await _gitService.MergeWithOutputAsync(branchOrRef, fetchFirst: isRemote);
             if (ok)
             {
@@ -1097,7 +1129,7 @@ public partial class MainWindow : Window
     private async Task CompareCommitWithLocalAsync(string commitHash)
     {
         TxtStatusMessage.Text = "Loading diff with local...";
-        string rawDiff = await _gitService.GetDiffAsync(commitHash);
+        string rawDiff = await _gitService.CompareAsync(commitHash);
         var diffWin = new DiffWindow($"Diff: {commitHash.Substring(0, Math.Min(8, commitHash.Length))} vs Local", "Compare with Local", rawDiff) { Owner = this };
         diffWin.Show();
         TxtStatusMessage.Text = "Ready";
@@ -1194,7 +1226,7 @@ public partial class MainWindow : Window
         var compareWithCurrent = new MenuItem { Header = $"Compare with '{_currentBranch}'" };
         compareWithCurrent.Click += async (_, _) =>
         {
-            string rawDiff = await _gitService.GetDiffAsync($"{_currentBranch}..{branchName}");
+            string rawDiff = await _gitService.CompareAsync(_currentBranch, branchName);
             var diffWin = new DiffWindow($"Compare: {_currentBranch} vs {branchName}", $"{branchName}", rawDiff) { Owner = this };
             diffWin.Show();
         };
@@ -1204,7 +1236,7 @@ public partial class MainWindow : Window
         var showDiffWithWT = new MenuItem { Header = "Show Diff with Working Tree" };
         showDiffWithWT.Click += async (_, _) =>
         {
-            string rawDiff = await _gitService.GetDiffAsync(branchName);
+            string rawDiff = await _gitService.CompareAsync(branchName);
             var diffWin = new DiffWindow($"Diff: Working Tree vs {branchName}", branchName, rawDiff) { Owner = this };
             diffWin.Show();
         };
@@ -1269,10 +1301,10 @@ public partial class MainWindow : Window
             var res = MessageBox.Show(this, $"Are you sure you want to delete branch '{branchName}'?", "Delete Branch", MessageBoxButton.YesNo, MessageBoxImage.Warning);
             if (res == MessageBoxResult.Yes)
             {
-                if (branchName.StartsWith("origin/"))
+                if (_branchRefs.Contains("refs/remotes/" + branchName))
                 {
-                    string rBranch = branchName.Substring(7);
-                    await _gitService.DeleteRemoteBranchAsync("origin", rBranch);
+                    int slash = branchName.IndexOf('/');
+                    await _gitService.DeleteRemoteBranchAsync(branchName[..slash], branchName[(slash + 1)..]);
                 }
                 else
                 {
@@ -1758,8 +1790,9 @@ public partial class MainWindow : Window
         }
         else if (item.Kind == BranchItemKind.Branch)
         {
-            bool isRemote = item.FullRef.StartsWith("refs/remotes/") || item.FullRef.StartsWith("origin/");
-            string branchName = item.Name;
+            bool isRemote = item.FullRef.StartsWith("refs/remotes/");
+            string branchName = item.FullRef.StartsWith("refs/remotes/") ? item.FullRef[13..]
+                : item.FullRef.StartsWith("refs/heads/") ? item.FullRef[11..] : item.FullRef;
 
             if (!isRemote)
             {
@@ -1875,7 +1908,7 @@ public partial class MainWindow : Window
             else
             {
                 // Remote Branch
-                string localCandidate = branchName.Contains('/') ? branchName.Substring(branchName.LastIndexOf('/') + 1) : branchName;
+                string localCandidate = branchName.Contains('/') ? branchName[(branchName.IndexOf('/') + 1)..] : branchName;
                 var checkoutItem = new MenuItem { Header = $"Checkout as Local Branch '{localCandidate}'..." };
                 checkoutItem.Click += async (_, _) =>
                 {
@@ -1888,7 +1921,7 @@ public partial class MainWindow : Window
                 var pullItem = new MenuItem { Header = $"Pull into '{_currentBranch}'" };
                 pullItem.Click += async (_, _) =>
                 {
-                    await ExecutePullWithAuthRetryAsync(item.Name, rebase: false);
+                    await ExecutePullWithAuthRetryAsync(branchName, rebase: false);
                 };
                 menu.Items.Add(pullItem);
 
@@ -1897,7 +1930,7 @@ public partial class MainWindow : Window
                     Header = $"Merge into '{_currentBranch}'...",
                     FontWeight = FontWeights.Bold
                 };
-                mergeItem.Click += async (_, _) => await PerformMergeAsync(item.Name);
+                mergeItem.Click += async (_, _) => await PerformMergeAsync(item.FullRef);
                 menu.Items.Add(mergeItem);
 
                 var rebaseItem = new MenuItem { Header = $"Rebase '{_currentBranch}' onto '{item.Name}'..." };
@@ -1922,13 +1955,14 @@ public partial class MainWindow : Window
                 deleteRemoteItem.Click += async (_, _) =>
                 {
                     var res = MessageBox.Show(this,
-                        $"Warning: This will delete the remote branch '{item.Name}' on origin!\nAre you sure?",
+                        $"Warning: This will delete '{branchName}' from the remote server.\nAre you sure?",
                         "Delete Remote Branch", MessageBoxButton.YesNo, MessageBoxImage.Warning);
                     if (res == MessageBoxResult.Yes)
                     {
                         TxtStatusMessage.Text = $"Deleting remote branch {item.Name}...";
-                        string remoteName = "origin";
-                        string remoteBranch = branchName.StartsWith("origin/") ? branchName.Substring(7) : branchName;
+                        int slash = branchName.IndexOf('/');
+                        string remoteName = branchName[..slash];
+                        string remoteBranch = branchName[(slash + 1)..];
                         await _gitService.DeleteRemoteBranchAsync(remoteName, remoteBranch);
                         await _gitService.FetchAllAsync();
                         await LoadRepositoryAsync(_gitService.RepositoryPath);
@@ -1991,13 +2025,7 @@ public partial class MainWindow : Window
             else if (item.Name == "Remote")
             {
                 var fetchItem = new MenuItem { Header = "Fetch All Remotes" };
-                fetchItem.Click += async (_, _) =>
-                {
-                    TxtStatusMessage.Text = "Fetching all remotes...";
-                    await _gitService.FetchAllAsync();
-                    await LoadRepositoryAsync(_gitService.RepositoryPath);
-                    TxtStatusMessage.Text = "Fetch complete.";
-                };
+                fetchItem.Click += (_, _) => OnFetchAllClicked(this, new RoutedEventArgs());
                 menu.Items.Add(fetchItem);
             }
             else if (item.Name == "Local")
@@ -2029,13 +2057,7 @@ public partial class MainWindow : Window
                 menu.Items.Add(showAllItem);
 
                 var fetchItem = new MenuItem { Header = "Fetch All Remotes" };
-                fetchItem.Click += async (_, _) =>
-                {
-                    TxtStatusMessage.Text = "Fetching all remotes...";
-                    await _gitService.FetchAllAsync();
-                    await LoadRepositoryAsync(_gitService.RepositoryPath);
-                    TxtStatusMessage.Text = "Fetch complete.";
-                };
+                fetchItem.Click += (_, _) => OnFetchAllClicked(this, new RoutedEventArgs());
                 menu.Items.Add(fetchItem);
             }
 
@@ -2122,13 +2144,61 @@ public partial class MainWindow : Window
 
     private async void OnFetchAllClicked(object sender, RoutedEventArgs e)
     {
-        TxtStatusMessage.Text = "Fetching all remotes...";
-        await _gitService.FetchAllAsync();
-        await LoadRepositoryAsync(_gitService.RepositoryPath);
-        TxtStatusMessage.Text = "Fetch complete.";
+        TxtStatusMessage.Text = "Fetching remotes...";
+        BeginLoading();
+        try
+        {
+            var remotes = await _gitService.GetRemotesAsync();
+            if (remotes.Count == 0) { TxtStatusMessage.Text = "No remotes configured."; return; }
+            foreach (var remote in remotes)
+            {
+                TxtStatusMessage.Text = $"Fetching {remote.Name}...";
+                var result = await _gitService.FetchWithDetailsAsync(remote.Name);
+                string error = string.IsNullOrEmpty(result.Error) ? result.Output : result.Error;
+                if (!result.Success && (GitService.IsAuthFailure(error) || GitService.IsSslFailure(error)))
+                {
+                    if (!await ConnectionAuthentication.PromptAsync(this, _gitService, remote.Url, error))
+                    { TxtStatusMessage.Text = "Fetch cancelled."; return; }
+                    result = await _gitService.FetchWithDetailsAsync(remote.Name);
+                }
+                if (!result.Success)
+                {
+                    TxtStatusMessage.Text = $"Fetch failed: {remote.Name}";
+                    MessageBox.Show(this, result.Error + result.Output, "Fetch failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+            }
+            await LoadRepositoryAsync(_gitService.RepositoryPath);
+            TxtStatusMessage.Text = "All remotes fetched.";
+        }
+        catch (Exception ex) { TxtStatusMessage.Text = $"Fetch failed: {ex.Message}"; }
+        finally { EndLoading(); }
+    }
+
+    private async void OnProfilesClicked(object sender, RoutedEventArgs e)
+    {
+        string? repository = _activeTab?.Path;
+        string remote = repository == null ? "" : await _gitService.GetRemoteUrlAsync();
+        var dialog = new ProfilesDialog(_profiles, repository, remote) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        if (dialog.CredentialsForgotten)
+            foreach (var service in _repositoryServices.Values) service.ClearSessionCredentials();
+        if (repository != null) await LoadRepositoryAsync(repository);
     }
 
     private async Task<bool> ExecutePullWithAuthRetryAsync(string? targetRef = null, bool rebase = false)
+    {
+        BeginLoading();
+        try { return await ExecutePullCoreAsync(targetRef, rebase); }
+        catch (Exception ex)
+        {
+            TxtStatusMessage.Text = $"Pull failed: {ex.Message}";
+            return false;
+        }
+        finally { EndLoading(); }
+    }
+
+    private async Task<bool> ExecutePullCoreAsync(string? targetRef, bool rebase)
     {
         TxtStatusMessage.Text = string.IsNullOrEmpty(targetRef)
             ? $"Pulling '{_currentBranch}'..."
@@ -2142,20 +2212,11 @@ public partial class MainWindow : Window
             {
                 TxtStatusMessage.Text = "Authentication required...";
                 string remoteUrl = await _gitService.GetRemoteUrlAsync();
-                var authDlg = new CredentialsDialog(remoteUrl, isSslError: GitService.IsSslFailure(error))
+                string target = targetRef?.Replace("refs/remotes/", "") ?? "";
+                var remote = (await _gitService.GetRemotesAsync()).FirstOrDefault(r => target.StartsWith(r.Name + "/", StringComparison.Ordinal));
+                if (remote != null) remoteUrl = remote.Url;
+                if (await ConnectionAuthentication.PromptAsync(this, _gitService, remoteUrl, error))
                 {
-                    Owner = this
-                };
-                if (authDlg.ShowDialog() == true)
-                {
-                    if (authDlg.DisableSslVerify)
-                    {
-                        await _gitService.SetSslVerifyAsync(false);
-                    }
-                    if (authDlg.RememberCredentials)
-                    {
-                        await _gitService.ApproveCredentialsAsync(remoteUrl, authDlg.Username, authDlg.Password);
-                    }
                     TxtStatusMessage.Text = "Retrying pull with credentials...";
                     var retry = await _gitService.PullWithDetailsAsync(targetRef, rebase);
                     if (retry.Success)
@@ -2245,7 +2306,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            int count = await _gitService.GetOutgoingCommitCountAsync(_currentBranch);
+            int count = await _gitService.GetOutgoingCommitCountAsync();
             if (count > 0)
             {
                 BtnToolbarPush.Content = $"⬆ Push ({count})";
@@ -2267,6 +2328,8 @@ public partial class MainWindow : Window
 
     private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (_busyDepth > 0) { e.Handled = true; return; }
+        if (_activeTab == null) return;
         if (e.Key == Key.K && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
         {
             if ((Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift)

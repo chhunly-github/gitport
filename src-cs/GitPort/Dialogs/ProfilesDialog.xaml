@@ -1,0 +1,57 @@
+<Window x:Class="GitPort.Dialogs.ProfilesDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Repository profiles" Width="780" Height="640" MinWidth="720" MinHeight="600"
+        Background="#152438" Foreground="#E6EEF8" WindowStartupLocation="CenterOwner">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/GitPort;component/Themes/WebStormTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <Style TargetType="TextBox" BasedOn="{StaticResource WebStormSearchBox}">
+                <Setter Property="Margin" Value="0,4,0,12"/>
+                <Setter Property="Height" Value="30"/>
+            </Style>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Grid Margin="20">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,18">
+            <TextBlock Text="Identity follows your repository" FontSize="22" FontWeight="SemiBold"/>
+            <TextBlock x:Name="TxtContext" Foreground="#8FA8C4" Margin="0,6,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="190"/><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Content="+ New" Click="OnNew" Style="{StaticResource WebStormButton}" Margin="0,0,6,0"/>
+                    <Button Content="Delete" Click="OnDelete" Style="{StaticResource WebStormGhostButton}"/>
+                </StackPanel>
+                <ListBox x:Name="ProfileList" Background="#1E324C" Foreground="#E6EEF8" BorderBrush="#293E5C" SelectionChanged="OnSelectionChanged"/>
+            </DockPanel>
+            <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="Editor">
+                    <TextBlock Text="Profile name"/><TextBox x:Name="TxtName"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                        <StackPanel><TextBlock Text="Commit author"/><TextBox x:Name="TxtAuthor"/></StackPanel>
+                        <StackPanel Grid.Column="2"><TextBlock Text="Commit email"/><TextBox x:Name="TxtEmail"/></StackPanel>
+                    </Grid>
+                    <TextBlock Text="HTTP username"/><TextBox x:Name="TxtUsername"/>
+                    <TextBlock Text="SSH private key path (optional)"/><TextBox x:Name="TxtSshKey"/>
+                    <TextBlock Text="Automatic remote rule (optional)"/><TextBox x:Name="TxtMatch"/>
+                    <TextBlock Text="Use a host:port or URL prefix, e.g. http://gogs.local:3000/team. The most specific rule wins. Blank identity fields keep your Git settings." Foreground="#8FA8C4" TextWrapping="Wrap" Margin="0,0,0,14"/>
+                    <CheckBox x:Name="ChkAssign" Content="Pin this profile to the current repository" Foreground="#E6EEF8" Margin="0,0,0,12"/>
+                    <Button Content="Forget saved logins for this profile" Click="OnForgetCredentials" Style="{StaticResource WebStormGhostButton}" HorizontalAlignment="Left"/>
+                    <TextBlock Text="Saved logins are encrypted for this Windows user. Passwords are requested when connecting. HTTP sends credentials without encryption." Foreground="#8FA8C4" TextWrapping="Wrap" Margin="0,10,0,0"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+        <Grid Grid.Row="2" Margin="0,18,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock x:Name="TxtError" Foreground="#F48771" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            <Button Grid.Column="1" Content="Cancel" IsCancel="True" Style="{StaticResource WebStormGhostButton}" Margin="8,0"/>
+            <Button Grid.Column="2" Content="Save profiles" Click="OnSave" Style="{StaticResource WebStormPrimaryButton}" Padding="16,6"/>
+        </Grid>
+    </Grid>
+</Window>
