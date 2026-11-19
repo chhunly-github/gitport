@@ -36,7 +36,10 @@ Click **Profile** in the top-right corner, then **+ New**. Set a profile name, c
 - Commit identities are supplied per Git process. Switching profiles does not rewrite repository or global author configuration.
 - Settings live beside the executable in `data/profiles.json`; the existing repository catalog remains in `data/profiles/default/settings.properties`.
 - HTTP login works for the current session with **Remember** cleared. Remembered logins are scoped to the profile and repository URL, encrypted with Windows DPAPI, and restored after restart. They can only be decrypted by the same Windows user; moving the portable folder to another user requires signing in again.
+- When connecting a new repository, choose an account from **Reuse a saved account on this server** to fill its saved username and password/token. Only accounts with the same protocol, host, and port appear. With **Remember** enabled, GitPort pins the existing profile to the new repository and saves its login for that repository URL; with it cleared, reuse lasts for the current session.
 - **Forget saved logins** removes that profile's stored logins when saved. Build updates preserve runtime data; portable archives exclude it.
+- When fetch, pull, or push reports invalid credentials or a missing repository, **Resolve Git Connection** shows the server error and lets you correct the clone URL, open the repository in your browser, copy its link, open token settings, or paste a new password/token. **Save & Retry** updates the selected remote and retries the operation. A corrected push URL leaves the fetch URL unchanged.
+- **Sign in with browser** uses Git Credential Manager for supported HTTPS hosts (GitHub, GitLab, Bitbucket Cloud, and Azure DevOps). Complete authentication in your browser, return to GitPort, and choose **Save & Retry**. If the helper is unavailable, use password/token entry. Gogs/Gitea and other servers provide website access and manual credentials; signing in to their website alone does not authenticate Git. Browser sign-in can be cancelled and times out after five minutes.
 
 ### Gogs without SSL
 
@@ -75,6 +78,7 @@ Gogs must have HTTP Git enabled and the account must have repository access. See
 - **Full-Row Selection:** Clear WebStorm dark theme accent selection.
 
 ### 5. Multi-Repository & Worktree Management
+- **Live Push Progress:** Shows compact object counts, percentage, transferred size, and speed while Git pushes. A reserved, scrollable message area keeps errors readable, with guidance for account limits, authentication, and rejected pushes. Final transfer totals remain in the status bar after completion.
 - **Repository Catalog:** Manage all repositories in a unified, tabbed interface.
 - **Git Worktree Support:** Create, switch, and inspect independent worktrees without switching branches or stashing in-progress edits.
 

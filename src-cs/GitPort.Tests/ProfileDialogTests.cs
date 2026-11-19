@@ -50,6 +50,36 @@ public class ProfileDialogTests
                     encoder.Save(output);
                 }
                 dialog.Close();
+
+                const string originalUrl = "http://gogs.local:3000/team/first.git";
+                profile.Credentials[originalUrl] = CredentialProtection.Protect("Authorization: Basic " +
+                    Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("developer:example-token")));
+                var git = new GitService(root, profiles: store);
+                var login = new CredentialsDialog("http://gogs.local:3000/team/new.git", git: git);
+                var accounts = (ComboBox)login.FindName("SavedAccounts");
+                Assert.Equal(2, accounts.Items.Count);
+                accounts.SelectedIndex = 1;
+                Assert.Same(profile, login.SelectedProfile);
+                Assert.Equal("developer", login.Username);
+                Assert.Equal("example-token", login.Password);
+                Assert.Equal(Visibility.Collapsed, ((TextBox)login.FindName("TxtPasswordVisible")).Visibility);
+                var loginContent = (FrameworkElement)login.Content;
+                loginContent.Measure(new Size(544, 541));
+                loginContent.Arrange(new Rect(0, 0, 544, 541));
+                loginContent.UpdateLayout();
+                if (directory != null)
+                {
+                    var loginBitmap = new RenderTargetBitmap(544, 541, 96, 96, PixelFormats.Pbgra32);
+                    loginBitmap.Render(loginContent);
+                    var loginEncoder = new PngBitmapEncoder();
+                    loginEncoder.Frames.Add(BitmapFrame.Create(loginBitmap));
+                    using var output = File.Create(Path.Combine(directory.FullName, "reports", "saved-account-picker.png"));
+                    loginEncoder.Save(output);
+                }
+                accounts.SelectedIndex = 0;
+                Assert.Null(login.SelectedProfile);
+                Assert.Equal("", login.Password);
+                login.Close();
             }
             catch (Exception ex) { failure = ex; }
         });

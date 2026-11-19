@@ -5,6 +5,24 @@ namespace GitPort.Tests;
 
 public sealed class GitWorkflowTests : IDisposable
 {
+    private sealed class CaptureProgress(Action<string> report) : IProgress<string>
+    {
+        public void Report(string value) => report(value);
+    }
+
+    [Fact]
+    public async Task PushProgress_HandlesCarriageReturnsAndPreservesDiagnostics()
+    {
+        const string output = "Counting objects: 50% (1/2)\rCounting objects: 100% (2/2), done.\r\nWriting objects: 100% (2/2), 234 bytes | 234.00 KiB/s, done.\nremote: accepted";
+        var updates = new List<string>();
+        var captured = await GitService.ReadGitProgressAsync(new StringReader(output), new CaptureProgress(updates.Add));
+        Assert.Equal(output, captured);
+        Assert.Equal(4, updates.Count);
+        Assert.Equal("Counting objects: 50% (1/2)", updates[0]);
+        Assert.Contains("234 bytes", updates[2]);
+        Assert.Equal("remote: accepted", updates[3]);
+    }
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), "GitPortWorkflow_" + Guid.NewGuid().ToString("N"));
     public GitWorkflowTests() => Directory.CreateDirectory(_root);
     public void Dispose()
@@ -123,8 +141,12 @@ public sealed class GitWorkflowTests : IDisposable
         await Write(git, "file.txt", "first");
         Assert.True(await git.StageAllAsync());
         Assert.True((await git.CommitAsync("initial")).Success);
-        var push = await git.PushWithDetailsAsync("release", "office");
+        var updates = new List<string>();
+        var push = await git.PushWithDetailsAsync("release", "office", progress: new CaptureProgress(updates.Add));
         Assert.True(push.Success, push.Error);
+        Assert.Contains(updates, line => System.Text.RegularExpressions.Regex.IsMatch(line,
+            @"Writing objects:\s+100% \(\d+/\d+\),\s+[\d.]+\s+(bytes|[KMGT]iB)"));
+        Assert.Contains("Writing objects:", push.Error);
         Assert.Equal(await git.GetHeadCommitHashAsync(), await Ok(git, "rev-parse", "office/release"));
         Assert.Equal("office", await git.GetDefaultRemoteAsync());
         Assert.Empty(await git.GetOutgoingCommitsAsync("release", "office"));

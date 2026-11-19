@@ -2157,7 +2157,7 @@ public partial class MainWindow : Window
                 string error = string.IsNullOrEmpty(result.Error) ? result.Output : result.Error;
                 if (!result.Success && (GitService.IsAuthFailure(error) || GitService.IsSslFailure(error)))
                 {
-                    if (!await ConnectionAuthentication.PromptAsync(this, _gitService, remote.Url, error))
+                    if (!await ConnectionAuthentication.PromptAsync(this, _gitService, remote.Url, error, remote.Name))
                     { TxtStatusMessage.Text = "Fetch cancelled."; return; }
                     result = await _gitService.FetchWithDetailsAsync(remote.Name);
                 }
@@ -2215,7 +2215,7 @@ public partial class MainWindow : Window
                 string target = targetRef?.Replace("refs/remotes/", "") ?? "";
                 var remote = (await _gitService.GetRemotesAsync()).FirstOrDefault(r => target.StartsWith(r.Name + "/", StringComparison.Ordinal));
                 if (remote != null) remoteUrl = remote.Url;
-                if (await ConnectionAuthentication.PromptAsync(this, _gitService, remoteUrl, error))
+                if (await ConnectionAuthentication.PromptAsync(this, _gitService, remoteUrl, error, remote?.Name))
                 {
                     TxtStatusMessage.Text = "Retrying pull with credentials...";
                     var retry = await _gitService.PullWithDetailsAsync(targetRef, rebase);
@@ -2275,11 +2275,12 @@ public partial class MainWindow : Window
         };
         if (pushDlg.ShowDialog() == true)
         {
+            await LoadRepositoryAsync(_gitService.RepositoryPath);
+            await UpdatePushStatusAsync();
             TxtStatusMessage.Text = pushDlg.PushedCommitCount > 0
                 ? $"Successfully pushed {pushDlg.PushedCommitCount} commit(s) to remote."
                 : "Push complete.";
-            await LoadRepositoryAsync(_gitService.RepositoryPath);
-            await UpdatePushStatusAsync();
+            if (pushDlg.TransferSummary.Length > 0) TxtStatusMessage.Text += " " + pushDlg.TransferSummary;
         }
     }
 

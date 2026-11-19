@@ -22,6 +22,7 @@ public partial class PushDialog : Window
     private int _previewVersion;
 
     public int PushedCommitCount => _outgoingCommits.Count;
+    public string TransferSummary { get; private set; } = "";
 
     public PushDialog(GitService gitService, string currentBranch)
     {
@@ -152,17 +153,17 @@ public partial class PushDialog : Window
     {
         if (_pushing) return;
         _pushing = true;
-        PushContent.IsEnabled = false;
-        LoadingHost.Visibility = Visibility.Visible;
+        PushPreview.IsEnabled = false;
+        PushOptions.IsEnabled = false;
         CboRemote.IsEnabled = false;
         TxtTargetBranch.IsEnabled = false;
         try { await PerformPushAsync(); }
-        catch (Exception ex) { TxtStatusMessage.Text = $"Push failed: {ex.Message}"; }
+        catch (Exception ex) { ShowPushFailure(ex.Message); }
         finally
         {
             _pushing = false;
-            LoadingHost.Visibility = Visibility.Collapsed;
-            PushContent.IsEnabled = true;
+            PushPreview.IsEnabled = true;
+            PushOptions.IsEnabled = true;
             CboRemote.IsEnabled = true;
             TxtTargetBranch.IsEnabled = true;
             BtnPush.IsEnabled = true;
@@ -187,29 +188,51 @@ public partial class PushDialog : Window
         BtnPush.IsEnabled = false;
         BtnCancel.IsEnabled = false;
         TxtStatusMessage.Text = $"Pushing to {remote}/{branch}...";
+        TxtPushMessages.Clear();
+        TxtPushGuidance.Text = "Pushing commits. Server errors and resolution steps will stay visible here.";
+        TransferSummary = "";
+        int attempt = 0;
+        IProgress<string> CreateProgress()
+        {
+            int currentAttempt = ++attempt;
+            return new Progress<string>(line =>
+            {
+                if (!_pushing || currentAttempt != attempt) return;
+                if (line.StartsWith("Writing objects:", StringComparison.Ordinal)) TransferSummary = line;
+                if (PushOutput.IsProgress(line))
+                    TxtStatusMessage.Text = TransferSummary.Length > 0 && line != TransferSummary
+                        ? $"{line}\n{TransferSummary}" : line;
+            });
+        }
 
         var (success, stdout, stderr) = await _gitService.PushWithDetailsAsync(
             branch: branch,
             remote: remote,
             forceWithLease: forceWithLease,
-            pushTags: pushTags);
+            pushTags: pushTags,
+            progress: CreateProgress());
+        ++attempt; // Ignore queued progress after the final result.
 
         if (!success)
         {
-            string error = string.IsNullOrEmpty(stderr) ? stdout : stderr;
+            string error = PushOutput.Diagnostics(stderr + "\n" + stdout);
+            ShowPushFailure(error);
 
             if (GitService.IsAuthFailure(error) || GitService.IsSslFailure(error))
             {
                 TxtStatusMessage.Text = "Authentication required...";
                 string remoteUrl = await _gitService.GetRemoteUrlAsync(remote, forPush: true);
-                if (await ConnectionAuthentication.PromptAsync(this, _gitService, remoteUrl, error))
+                if (await ConnectionAuthentication.PromptAsync(this, _gitService, remoteUrl, error, remote, forPush: true))
                 {
                     TxtStatusMessage.Text = "Retrying push with credentials...";
+                    TransferSummary = "";
                     var retry = await _gitService.PushWithDetailsAsync(
                         branch: branch,
                         remote: remote,
                         forceWithLease: forceWithLease,
-                        pushTags: pushTags);
+                        pushTags: pushTags,
+                        progress: CreateProgress());
+                    ++attempt;
 
                     if (retry.Success)
                     {
@@ -220,22 +243,9 @@ public partial class PushDialog : Window
                     }
                     else
                     {
-                        string retryErr = string.IsNullOrEmpty(retry.Error) ? retry.Output : retry.Error;
-                        MessageBox.Show(this, $"Push failed after authentication:\n\n{retryErr}", "Git Push Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        ShowPushFailure(retry.Error + "\n" + retry.Output);
                     }
                 }
-            }
-            else if (GitService.IsPushRejectedFailure(error))
-            {
-                MessageBox.Show(this,
-                    $"Push rejected by remote:\n\n{error}\n\nThe remote repository contains work that you do not have locally. Please Pull or Merge remote changes before pushing.",
-                    "Push Rejected (Non-Fast-Forward)",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
-            }
-            else
-            {
-                MessageBox.Show(this, $"Git push failed:\n\n{error}", "Git Push Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
 
             BtnPush.IsEnabled = true;
@@ -247,6 +257,15 @@ public partial class PushDialog : Window
         TxtStatusMessage.Text = "Push succeeded!";
         DialogResult = true;
         Close();
+    }
+
+    private void ShowPushFailure(string output)
+    {
+        string error = PushOutput.Diagnostics(output);
+        TxtStatusMessage.Text = "Push failed. Review the message below.";
+        TxtPushGuidance.Text = PushOutput.Guidance(error);
+        TxtPushMessages.Text = string.IsNullOrWhiteSpace(error) ? "Git did not return an error message." : error;
+        TxtPushMessages.ScrollToHome();
     }
 
     private async void OnViewCommitDiffClicked(object sender, RoutedEventArgs e)

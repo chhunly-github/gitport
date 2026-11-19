@@ -43,7 +43,12 @@ public record GitRemote(string Name, string Url);
 
 public record GitProviderInfo(string Name, string Hint, string Icon);
 
-public class GitService
+public record SavedGitAccount(GitProfile Profile, string RemoteUrl)
+{
+    public override string ToString() => $"{Profile.Name} — {new Uri(RemoteUrl).AbsolutePath}";
+}
+
+public partial class GitService
 {
     private readonly string _gitExe;
     private readonly ProfileService? _profiles;
@@ -107,12 +112,43 @@ public class GitService
         psi.Environment["GIT_CONFIG_COUNT"] = count.ToString();
     }
 
-    public Task SetCredentialsAsync(string url, string username, string password, bool remember)
+    private static bool SameHttpServer(string first, string second) =>
+        Uri.TryCreate(first, UriKind.Absolute, out var a) &&
+        Uri.TryCreate(second, UriKind.Absolute, out var b) &&
+        a.Scheme is "http" or "https" && a.Scheme == b.Scheme &&
+        a.Host.Equals(b.Host, StringComparison.OrdinalIgnoreCase) && a.Port == b.Port;
+
+    public IReadOnlyList<SavedGitAccount> GetSavedAccounts(string url) =>
+        _profiles?.Profiles.SelectMany(p => p.Credentials.Keys
+            .Where(remote => SameHttpServer(remote, url)).Select(remote => new SavedGitAccount(p, remote)))
+            .OrderBy(account => account.Profile.Name).ThenBy(account => account.RemoteUrl).ToList()
+        ?? new List<SavedGitAccount>();
+
+    public (string Username, string Password) ReadSavedAccount(SavedGitAccount account, string url)
+    {
+        if (_profiles == null || !_profiles.Profiles.Contains(account.Profile) || !SameHttpServer(account.RemoteUrl, url))
+            throw new ArgumentException("This saved account belongs to a different server.");
+        string header = CredentialProtection.Unprotect(account.Profile.Credentials[account.RemoteUrl]);
+        const string prefix = "Authorization: Basic ";
+        if (!header.StartsWith(prefix, StringComparison.Ordinal)) throw new FormatException("Unsupported saved login.");
+        string login = Encoding.UTF8.GetString(Convert.FromBase64String(header[prefix.Length..]));
+        int separator = login.IndexOf(':');
+        if (separator < 0) throw new FormatException("Invalid saved login.");
+        return (login[..separator], login[(separator + 1)..]);
+    }
+
+    public Task SetCredentialsAsync(string url, string username, string password, bool remember, GitProfile? savedProfile = null)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != "http" && uri.Scheme != "https"))
             throw new ArgumentException("Username/password login requires an HTTP or HTTPS remote. Configure an SSH key in Profiles for SSH remotes.");
         if (username.Contains(':') || username.Any(char.IsControl) || password.Any(char.IsControl))
             throw new ArgumentException("Credentials contain unsupported characters.");
+        if (savedProfile != null)
+        {
+            if (_profiles == null || !_profiles.Profiles.Contains(savedProfile))
+                throw new ArgumentException("The saved profile is no longer available.");
+            ActiveProfile = savedProfile;
+        }
         string context = new UriBuilder(uri) { UserName = "", Password = "", Query = "", Fragment = "" }.Uri.AbsoluteUri.TrimEnd('/');
         string header = "Authorization: Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(username + ":" + password));
         if (remember && _profiles != null)
@@ -124,6 +160,7 @@ public class GitService
                 _profiles.Assign(RepositoryPath, ActiveProfile);
             }
             ActiveProfile.Credentials[context] = CredentialProtection.Protect(header);
+            if (savedProfile != null) _profiles.Assign(RepositoryPath, ActiveProfile);
             _profiles.Save();
         }
         _sessionCredentials[(ActiveProfile?.Id ?? "") + "|" + context] = header;
@@ -151,7 +188,10 @@ public class GitService
         return "git.exe";
     }
 
-    public async Task<(int ExitCode, string StdOut, string StdErr)> RunGitAsync(params string[] args)
+    public Task<(int ExitCode, string StdOut, string StdErr)> RunGitAsync(params string[] args) =>
+        RunGitWithProgressAsync(null, args);
+
+    private async Task<(int ExitCode, string StdOut, string StdErr)> RunGitWithProgressAsync(IProgress<string>? progress, params string[] args)
     {
         var psi = new ProcessStartInfo
         {
@@ -165,6 +205,7 @@ public class GitService
             StandardErrorEncoding = Encoding.UTF8
         };
         ConfigureProcess(psi);
+        if (progress != null) psi.Environment["LC_ALL"] = "C";
 
         foreach (var arg in args)
         {
@@ -175,13 +216,40 @@ public class GitService
         process.Start();
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stderrTask = progress == null
+            ? process.StandardError.ReadToEndAsync()
+            : ReadGitProgressAsync(process.StandardError, progress);
 
         await process.WaitForExitAsync();
         string stdout = await stdoutTask;
         string stderr = await stderrTask;
 
         return (process.ExitCode, stdout, stderr);
+    }
+
+    internal static async Task<string> ReadGitProgressAsync(TextReader reader, IProgress<string> progress)
+    {
+        var output = new StringBuilder();
+        var line = new StringBuilder();
+        var buffer = new char[1024];
+        int length;
+        while ((length = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false)) > 0)
+        {
+            output.Append(buffer, 0, length);
+            for (int i = 0; i < length; i++)
+            {
+                char c = buffer[i];
+                if (c is '\r' or '\n')
+                {
+                    if (line.Length == 0) continue;
+                    progress.Report(line.ToString().Trim());
+                    line.Clear();
+                }
+                else line.Append(c);
+            }
+        }
+        if (line.Length > 0) progress.Report(line.ToString().Trim());
+        return output.ToString();
     }
 
     public async Task<(int ExitCode, string StdOut, string StdErr)> RunGitWithInputAsync(string input, params string[] args)
@@ -725,7 +793,17 @@ public class GitService
                text.Contains("The requested URL returned error: 401", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("The requested URL returned error: 403", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("Invalid username or password", StringComparison.OrdinalIgnoreCase) ||
-               text.Contains("Repository not found", StringComparison.OrdinalIgnoreCase);
+               text.Contains("Repository not found", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("repository does not exist", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("returned error: 404", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("invalid credentials", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("invalid token", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("expired token", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("token expired", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("invalid username or token", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("password authentication is not supported", StringComparison.OrdinalIgnoreCase) ||
+               (text.Contains("repository", StringComparison.OrdinalIgnoreCase) && text.Contains("not found", StringComparison.OrdinalIgnoreCase)) ||
+               text.Contains("Access denied", StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool IsSslFailure(string? text)
@@ -1054,9 +1132,11 @@ public class GitService
         string? remote = null,
         bool forceWithLease = false,
         bool pushTags = false,
-        bool setUpstream = false)
+        bool setUpstream = false,
+        IProgress<string>? progress = null)
     {
         var args = new List<string> { "push" };
+        if (progress != null) args.Add("--progress");
         if (forceWithLease) args.Add("--force-with-lease");
         if (pushTags) args.Add("--tags");
 
@@ -1079,7 +1159,7 @@ public class GitService
             args.Add($"HEAD:refs/heads/{br}");
         }
 
-        var (code, stdout, stderr) = await RunGitAsync(args.ToArray());
+        var (code, stdout, stderr) = await RunGitWithProgressAsync(progress, args.ToArray());
         return (code == 0, stdout, stderr);
     }
 

@@ -34,6 +34,8 @@ public sealed class HttpGitTests
             var denied = await git.FetchWithDetailsAsync("gogs");
             Assert.False(denied.Success);
             Assert.True(GitService.IsAuthFailure(denied.Error), denied.Error);
+            await git.SetCredentialsAsync(url, "test-user", "wrong-password", false);
+            Assert.False((await git.FetchWithDetailsAsync("gogs")).Success);
             await git.SetCredentialsAsync(url, "test-user", "test-password", false);
             var fetch = await git.FetchWithDetailsAsync("gogs");
             Assert.True(fetch.Success, fetch.Error);
@@ -56,6 +58,36 @@ public sealed class HttpGitTests
             var unrelated = await restarted.RunGitAsync("ls-remote", $"http://127.0.0.1:{server.Port}/other.git");
             Assert.NotEqual(0, unrelated.ExitCode);
             Assert.False(server.LeakedAuthorization);
+
+            // A new repository can explicitly reuse an existing account on the same server.
+            Assert.Equal(0, (await new GitService(root).RunGitAsync("init", "--bare", "second.git")).ExitCode);
+            string secondUrl = $"http://127.0.0.1:{server.Port}/second.git";
+            string secondLocal = Path.Combine(root, "second-local");
+            Directory.CreateDirectory(secondLocal);
+            var reusedProfiles = new ProfileService(Path.Combine(root, "profiles.json"));
+            var second = new GitService(secondLocal, profiles: reusedProfiles);
+            await second.RunGitAsync("init");
+            await second.RunGitAsync("remote", "add", "origin", secondUrl);
+            await second.ResolveProfileAsync();
+            Assert.Null(second.ActiveProfile);
+            Assert.False((await second.FetchWithDetailsAsync("origin")).Success);
+            var account = Assert.Single(second.GetSavedAccounts(secondUrl));
+            Assert.Empty(second.GetSavedAccounts(secondUrl.Replace("http:", "https:")));
+            Assert.Empty(second.GetSavedAccounts($"http://127.0.0.1:{server.Port + 1}/second.git"));
+            Assert.Empty(second.GetSavedAccounts($"http://localhost:{server.Port}/second.git"));
+            Assert.Throws<ArgumentException>(() => second.ReadSavedAccount(account, "https://example.test/repo.git"));
+            var login = second.ReadSavedAccount(account, secondUrl);
+            await second.SetCredentialsAsync(secondUrl, login.Username, login.Password, false, account.Profile);
+            Assert.True((await second.FetchWithDetailsAsync("origin")).Success);
+            Assert.False(reusedProfiles.IsAssigned(secondLocal));
+            Assert.Single(account.Profile.Credentials);
+            await second.SetCredentialsAsync(secondUrl, login.Username, login.Password, true, account.Profile);
+            Assert.Single(reusedProfiles.Profiles);
+            var reopenedSecond = new GitService(secondLocal, profiles: new ProfileService(Path.Combine(root, "profiles.json")));
+            await reopenedSecond.ResolveProfileAsync();
+            Assert.Equal(account.Profile.Id, reopenedSecond.ActiveProfile?.Id);
+            Assert.True((await reopenedSecond.FetchWithDetailsAsync("origin")).Success);
+            Assert.DoesNotContain("test-password", await File.ReadAllTextAsync(Path.Combine(root, "profiles.json")));
         }
         finally
         {

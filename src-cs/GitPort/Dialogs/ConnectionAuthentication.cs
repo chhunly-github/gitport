@@ -5,7 +5,8 @@ namespace GitPort.Dialogs;
 
 internal static class ConnectionAuthentication
 {
-    public static async Task<bool> PromptAsync(Window owner, GitService git, string url, string error)
+    public static async Task<bool> PromptAsync(Window owner, GitService git, string url, string error,
+        string? remoteName = null, bool forPush = false)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
         {
@@ -13,13 +14,18 @@ internal static class ConnectionAuthentication
                 "SSH authentication", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-        var dialog = new CredentialsDialog(url, git.ActiveProfile?.Username, GitService.IsSslFailure(error)) { Owner = owner };
+        var dialog = new CredentialsDialog(url, git.ActiveProfile?.Username, GitService.IsSslFailure(error),
+            customErrorMessage: error, git: git) { Owner = owner };
         if (dialog.ShowDialog() != true) return false;
         try
         {
-            if (dialog.DisableSslVerify && !await git.SetSslVerifyAsync(false, url))
+            string correctedUrl = dialog.RemoteUrl;
+            if (correctedUrl != url)
+                await git.SetConnectionUrlAsync(remoteName ?? await git.GetDefaultRemoteAsync(), correctedUrl, forPush);
+            if (dialog.DisableSslVerify && !await git.SetSslVerifyAsync(false, correctedUrl))
                 throw new InvalidOperationException("Could not save the certificate setting for this remote.");
-            await git.SetCredentialsAsync(url, dialog.Username, dialog.Password, dialog.RememberCredentials);
+            if (!string.IsNullOrEmpty(dialog.Username) && !string.IsNullOrEmpty(dialog.Password))
+                await git.SetCredentialsAsync(correctedUrl, dialog.Username, dialog.Password, dialog.RememberCredentials, dialog.SelectedProfile);
             return true;
         }
         catch (Exception ex)
